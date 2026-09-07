@@ -20,19 +20,19 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	pkgauth "github.com/skillofide/pkg/auth"
-	pkglog "github.com/skillofide/pkg/logger"
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
-	"github.com/skillofide/proto/codec"
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	problemv1 "github.com/skillofide/proto/problem/v1"
-	progressv1 "github.com/skillofide/proto/progress/v1"
-	submissionv1 "github.com/skillofide/proto/submission/v1"
-	userv1 "github.com/skillofide/proto/user/v1"
+	pkgauth "github.com/knovate211/pkg/auth"
+	pkglog "github.com/knovate211/pkg/logger"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
+	"github.com/knovate211/proto/codec"
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
+	progressv1 "github.com/knovate211/proto/progress/v1"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
+	userv1 "github.com/knovate211/proto/user/v1"
 
-	"github.com/skillofide/api-gateway/graph/generated"
-	"github.com/skillofide/api-gateway/graph/resolvers"
-	"github.com/skillofide/api-gateway/middleware"
+	"github.com/knovate211/api-gateway/graph/generated"
+	"github.com/knovate211/api-gateway/graph/resolvers"
+	"github.com/knovate211/api-gateway/middleware"
 )
 
 func main() {

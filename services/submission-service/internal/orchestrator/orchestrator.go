@@ -11,10 +11,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	progressv1 "github.com/skillofide/proto/progress/v1"
-	submissionv1 "github.com/skillofide/proto/submission/v1"
-	"github.com/skillofide/submission-service/internal/repository"
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	progressv1 "github.com/knovate211/proto/progress/v1"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
+	"github.com/knovate211/submission-service/internal/repository"
 )
 
 const (

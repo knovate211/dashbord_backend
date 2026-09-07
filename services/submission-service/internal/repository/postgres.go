@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	submissionv1 "github.com/skillofide/proto/submission/v1"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
 )
 
 // SubmissionRepository wraps a pgxpool for submission CRUD.

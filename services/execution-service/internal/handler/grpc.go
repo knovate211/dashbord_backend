@@ -12,11 +12,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/skillofide/execution-service/internal/judge"
-	"github.com/skillofide/execution-service/internal/sandbox"
-	"github.com/skillofide/execution-service/internal/worker"
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	"github.com/knovate211/execution-service/internal/judge"
+	"github.com/knovate211/execution-service/internal/sandbox"
+	"github.com/knovate211/execution-service/internal/worker"
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 // ExecutionHandler implements executionv1.ExecutionServiceServer.

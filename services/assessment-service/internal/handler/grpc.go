@@ -14,10 +14,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/skillofide/assessment-service/internal/repository"
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	submissionv1 "github.com/skillofide/proto/submission/v1"
+	"github.com/knovate211/assessment-service/internal/repository"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
 )
 
 // Handler implements assessmentv1.AssessmentServiceServer.

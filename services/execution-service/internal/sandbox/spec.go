@@ -3,7 +3,7 @@ package sandbox
 import (
 	"strings"
 
-	"github.com/skillofide/execution-service/internal/codegen"
+	"github.com/knovate211/execution-service/internal/codegen"
 )
 
 // ExecutionSpec is the sandbox-side view of a problem's execution contract.

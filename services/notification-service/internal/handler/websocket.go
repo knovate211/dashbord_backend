@@ -11,7 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
-	notificationv1 "github.com/skillofide/proto/notification/v1"
+	notificationv1 "github.com/knovate211/proto/notification/v1"
 )
 
 var upgrader = websocket.Upgrader{

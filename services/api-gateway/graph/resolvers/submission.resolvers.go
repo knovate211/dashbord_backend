@@ -6,9 +6,9 @@ import (
 	"github.com/graphql-go/graphql"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/api-gateway/middleware"
-	submissionv1 "github.com/skillofide/proto/submission/v1"
-	executionv1 "github.com/skillofide/proto/execution/v1"
+	"github.com/knovate211/api-gateway/middleware"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
+	executionv1 "github.com/knovate211/proto/execution/v1"
 )
 
 // SubmissionClients holds all gRPC clients needed for submission resolvers.

@@ -22,8 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/api-gateway/middleware"
-	pkgauth "github.com/skillofide/pkg/auth"
+	"github.com/knovate211/api-gateway/middleware"
+	pkgauth "github.com/knovate211/pkg/auth"
 )
 
 // ScholarshipHandler runs the public scholarship funnel: a visitor picks a

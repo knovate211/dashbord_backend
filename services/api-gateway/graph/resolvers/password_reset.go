@@ -13,7 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	pkgauth "github.com/skillofide/pkg/auth"
+	pkgauth "github.com/knovate211/pkg/auth"
 	"go.uber.org/zap"
 )
 

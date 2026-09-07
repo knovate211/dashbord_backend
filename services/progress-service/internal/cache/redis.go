@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	progressv1 "github.com/skillofide/proto/progress/v1"
+	progressv1 "github.com/knovate211/proto/progress/v1"
 )
 
 const (

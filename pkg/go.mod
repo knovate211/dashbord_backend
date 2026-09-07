@@ -1,4 +1,4 @@
-module github.com/skillofide/pkg
+module github.com/knovate211/pkg
 
 go 1.22
 

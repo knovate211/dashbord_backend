@@ -8,9 +8,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/skillofide/progress-service/internal/cache"
-	"github.com/skillofide/progress-service/internal/repository"
-	progressv1 "github.com/skillofide/proto/progress/v1"
+	"github.com/knovate211/progress-service/internal/cache"
+	"github.com/knovate211/progress-service/internal/repository"
+	progressv1 "github.com/knovate211/proto/progress/v1"
 )
 
 // ProgressHandler implements progressv1.ProgressServiceServer.

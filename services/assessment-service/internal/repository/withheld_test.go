@@ -3,7 +3,7 @@ package repository
 import (
 	"testing"
 
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // TestResultsWithheld pins down which papers hide their score from the person

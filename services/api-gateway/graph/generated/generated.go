@@ -5,7 +5,7 @@ package generated
 import (
 	"github.com/graphql-go/graphql"
 
-	"github.com/skillofide/api-gateway/graph/resolvers"
+	"github.com/knovate211/api-gateway/graph/resolvers"
 )
 
 // ─── Shared GraphQL Types ─────────────────────────────────────────────────────

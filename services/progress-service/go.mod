@@ -1,4 +1,4 @@
-module github.com/skillofide/progress-service
+module github.com/knovate211/progress-service
 
 go 1.22
 

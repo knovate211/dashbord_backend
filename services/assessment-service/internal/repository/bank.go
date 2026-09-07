@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // UpsertMcqQuestion creates or replaces a bank question together with its

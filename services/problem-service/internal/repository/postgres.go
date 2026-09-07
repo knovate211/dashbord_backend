@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 // ProblemRepository wraps a pgxpool and implements all problem data queries.

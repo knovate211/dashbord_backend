@@ -3,7 +3,7 @@ package repository
 import (
 	"testing"
 
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 func starterCodesFor(js, py, java, cpp, goSrc string) problemv1.StarterCodes {

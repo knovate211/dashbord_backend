@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	progressv1 "github.com/skillofide/proto/progress/v1"
+	progressv1 "github.com/knovate211/proto/progress/v1"
 )
 
 // ProgressRepository wraps a pgxpool for progress CRUD.

@@ -1,4 +1,4 @@
-module github.com/skillofide/user-service
+module github.com/knovate211/user-service
 
 go 1.22
 

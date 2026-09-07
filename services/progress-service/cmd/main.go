@@ -12,14 +12,14 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/skillofide/proto/codec"
-	progressv1 "github.com/skillofide/proto/progress/v1"
-	pkgdb "github.com/skillofide/pkg/database"
-	pkglog "github.com/skillofide/pkg/logger"
+	"github.com/knovate211/proto/codec"
+	progressv1 "github.com/knovate211/proto/progress/v1"
+	pkgdb "github.com/knovate211/pkg/database"
+	pkglog "github.com/knovate211/pkg/logger"
 
-	"github.com/skillofide/progress-service/internal/cache"
-	"github.com/skillofide/progress-service/internal/handler"
-	"github.com/skillofide/progress-service/internal/repository"
+	"github.com/knovate211/progress-service/internal/cache"
+	"github.com/knovate211/progress-service/internal/handler"
+	"github.com/knovate211/progress-service/internal/repository"
 )
 
 func main() {

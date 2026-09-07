@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/status"
 
-	"github.com/skillofide/api-gateway/middleware"
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	"github.com/knovate211/api-gateway/middleware"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // RecruiterHandler serves /api/recruiter/* for test authoring, candidate

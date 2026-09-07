@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	pkgauth "github.com/skillofide/pkg/auth"
+	pkgauth "github.com/knovate211/pkg/auth"
 )
 
 type contextKey string

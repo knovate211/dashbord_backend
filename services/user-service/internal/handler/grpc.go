@@ -8,8 +8,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/skillofide/user-service/internal/repository"
-	userv1 "github.com/skillofide/proto/user/v1"
+	"github.com/knovate211/user-service/internal/repository"
+	userv1 "github.com/knovate211/proto/user/v1"
 )
 
 type UserHandler struct {

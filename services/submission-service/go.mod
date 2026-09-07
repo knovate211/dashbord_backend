@@ -1,4 +1,4 @@
-module github.com/skillofide/submission-service
+module github.com/knovate211/submission-service
 
 go 1.22
 

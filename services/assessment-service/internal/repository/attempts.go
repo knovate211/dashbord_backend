@@ -14,8 +14,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/skillofide/assessment-service/internal/grading"
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	"github.com/knovate211/assessment-service/internal/grading"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // ErrAttemptClosed is returned by every write path once an attempt is no

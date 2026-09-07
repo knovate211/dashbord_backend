@@ -15,7 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // ─── Invitations ──────────────────────────────────────────────────────────────

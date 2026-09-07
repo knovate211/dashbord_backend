@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/skillofide/proto v0.0.0
+	github.com/knovate211/proto v0.0.0
 	google.golang.org/grpc v1.82.0
 )
 
@@ -18,4 +18,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace github.com/skillofide/proto => ./proto
+replace github.com/knovate211/proto => ./proto

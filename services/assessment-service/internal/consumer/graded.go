@@ -16,7 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/assessment-service/internal/repository"
+	"github.com/knovate211/assessment-service/internal/repository"
 )
 
 const (

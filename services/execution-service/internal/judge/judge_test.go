@@ -3,9 +3,9 @@ package judge
 import (
 	"testing"
 
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	problemv1 "github.com/skillofide/proto/problem/v1"
-	"github.com/skillofide/execution-service/internal/sandbox"
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
+	"github.com/knovate211/execution-service/internal/sandbox"
 )
 
 func TestNormalize(t *testing.T) {

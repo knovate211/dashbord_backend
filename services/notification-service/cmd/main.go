@@ -9,9 +9,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
-	pkglog "github.com/skillofide/pkg/logger"
-	"github.com/skillofide/notification-service/internal/handler"
-	"github.com/skillofide/notification-service/internal/subscriber"
+	pkglog "github.com/knovate211/pkg/logger"
+	"github.com/knovate211/notification-service/internal/handler"
+	"github.com/knovate211/notification-service/internal/subscriber"
 )
 
 func main() {
