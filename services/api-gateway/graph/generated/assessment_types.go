@@ -104,6 +104,7 @@ var attemptStateType = graphql.NewObject(graphql.ObjectConfig{
 		"title":          &graphql.Field{Type: graphql.String},
 		"status":         &graphql.Field{Type: graphql.String},
 		"allowBacktrack": &graphql.Field{Type: graphql.Boolean},
+		"lockForward":    &graphql.Field{Type: graphql.Boolean},
 		"proctoring":     &graphql.Field{Type: proctoringType},
 		// serverNow and secondsLeft are the authoritative clock; the client's
 		// own time is display-only.

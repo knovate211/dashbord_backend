@@ -174,29 +174,32 @@ type Section struct {
 }
 
 type Assessment struct {
-	Id               string      `json:"id,omitempty"`
-	CompanyId        string      `json:"company_id,omitempty"`
-	CompanyName      string      `json:"company_name,omitempty"`
-	Title            string      `json:"title"`
-	Description      string      `json:"description"`
-	Purpose          string      `json:"purpose"` // practice | hiring | scholarship
-	DurationMinutes  int32       `json:"duration_minutes"`
-	TotalMarks       int32       `json:"total_marks"`
-	PassingMarks     int32       `json:"passing_marks"`
-	NegativeMarking  float64     `json:"negative_marking"`
-	ShuffleQuestions bool        `json:"shuffle_questions"`
-	ShuffleOptions   bool        `json:"shuffle_options"`
-	AllowBacktrack   bool        `json:"allow_backtrack"`
-	RevealResults    bool        `json:"reveal_results"`
-	Proctoring       *Proctoring `json:"proctoring,omitempty"`
-	Status           string      `json:"status"` // draft | published | archived
-	OpensAt          string      `json:"opens_at,omitempty"`
-	ClosesAt         string      `json:"closes_at,omitempty"`
-	MaxAttempts      int32       `json:"max_attempts"`
-	CreatedBy        string      `json:"created_by,omitempty"`
-	CreatedAt        string      `json:"created_at,omitempty"`
-	UpdatedAt        string      `json:"updated_at,omitempty"`
-	Sections         []*Section  `json:"sections,omitempty"`
+	Id               string  `json:"id,omitempty"`
+	CompanyId        string  `json:"company_id,omitempty"`
+	CompanyName      string  `json:"company_name,omitempty"`
+	Title            string  `json:"title"`
+	Description      string  `json:"description"`
+	Purpose          string  `json:"purpose"` // practice | hiring | scholarship
+	DurationMinutes  int32   `json:"duration_minutes"`
+	TotalMarks       int32   `json:"total_marks"`
+	PassingMarks     int32   `json:"passing_marks"`
+	NegativeMarking  float64 `json:"negative_marking"`
+	ShuffleQuestions bool    `json:"shuffle_questions"`
+	ShuffleOptions   bool    `json:"shuffle_options"`
+	AllowBacktrack   bool    `json:"allow_backtrack"`
+	// LockForward hides the rest of the paper until the current question is
+	// answered. Orthogonal to AllowBacktrack, which governs the other direction.
+	LockForward   bool        `json:"lock_forward"`
+	RevealResults bool        `json:"reveal_results"`
+	Proctoring    *Proctoring `json:"proctoring,omitempty"`
+	Status        string      `json:"status"` // draft | published | archived
+	OpensAt       string      `json:"opens_at,omitempty"`
+	ClosesAt      string      `json:"closes_at,omitempty"`
+	MaxAttempts   int32       `json:"max_attempts"`
+	CreatedBy     string      `json:"created_by,omitempty"`
+	CreatedAt     string      `json:"created_at,omitempty"`
+	UpdatedAt     string      `json:"updated_at,omitempty"`
+	Sections      []*Section  `json:"sections,omitempty"`
 
 	// Read-only rollups used by list views.
 	QuestionCount int32 `json:"question_count,omitempty"`
@@ -362,6 +365,7 @@ type AttemptState struct {
 	Title           string             `json:"title"`
 	Status          string             `json:"status"`
 	AllowBacktrack  bool               `json:"allow_backtrack"`
+	LockForward     bool               `json:"lock_forward"`
 	Proctoring      *Proctoring        `json:"proctoring,omitempty"`
 	ServerNow       string             `json:"server_now"`
 	ExpiresAt       string             `json:"expires_at"`

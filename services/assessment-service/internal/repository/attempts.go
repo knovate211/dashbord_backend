@@ -50,6 +50,7 @@ type attemptCtx struct {
 	IntegrityScore  float64
 	Title           string
 	AllowBacktrack  bool
+	LockForward     bool
 	RevealResults   bool
 	NegativeMarking float64
 	PassingMarks    float64
@@ -627,14 +628,14 @@ func (r *Repo) loadAttempt(ctx context.Context, q querier, attemptID string, loc
 	err := q.QueryRow(ctx, `
 		SELECT at.id::text, at.assessment_id::text, at.user_id::text, at.status, at.seed,
 		       at.started_at, at.expires_at, at.max_score, at.score, at.integrity_score,
-		       a.title, a.allow_backtrack, a.reveal_results, a.negative_marking,
+		       a.title, a.allow_backtrack, a.lock_forward, a.reveal_results, a.negative_marking,
 		       a.passing_marks, a.purpose, a.proctoring
 		FROM   attempts at
 		JOIN   assessments a ON a.id = at.assessment_id
 		WHERE  at.id = $1`+suffix, attemptID).
 		Scan(&a.ID, &a.AssessmentID, &a.UserID, &a.Status, &a.Seed,
 			&a.StartedAt, &a.ExpiresAt, &a.MaxScore, &a.Score, &a.IntegrityScore,
-			&a.Title, &a.AllowBacktrack, &a.RevealResults, &a.NegativeMarking,
+			&a.Title, &a.AllowBacktrack, &a.LockForward, &a.RevealResults, &a.NegativeMarking,
 			&a.PassingMarks, &a.Purpose, &proctoring)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -677,6 +678,7 @@ func (r *Repo) GetAttemptState(ctx context.Context, attemptID, userID string) (*
 		Title:           a.Title,
 		Status:          a.Status,
 		AllowBacktrack:  a.AllowBacktrack,
+		LockForward:     a.LockForward,
 		Proctoring:      a.Proctoring,
 		ServerNow:       now.Format(time.RFC3339),
 		ExpiresAt:       a.ExpiresAt.UTC().Format(time.RFC3339),
@@ -838,6 +840,17 @@ func (r *Repo) SaveAnswer(ctx context.Context, req *assessmentv1.SaveAnswerReque
 	if err != nil {
 		return 0, fmt.Errorf("lookup attempt question: %w", err)
 	}
+
+	// On a sequential paper the client only ever shows the candidate a question
+	// whose predecessors are done, but the client is not the authority: a
+	// hand-rolled request could otherwise write an answer for a question the
+	// candidate was never meant to have reached.
+	if a.LockForward {
+		if err := r.requireEarlierAnswered(ctx, req.AttemptId, orderIndex); err != nil {
+			return 0, err
+		}
+	}
+
 	// A coding question saves a draft, not an answer: the editor's contents are
 	// stored verbatim and nothing is graded. Grading still only happens through
 	// SubmitAttemptCode, so this cannot be used to sneak an ungraded run past
@@ -896,6 +909,31 @@ func (r *Repo) SaveAnswer(ctx context.Context, req *assessmentv1.SaveAnswerReque
 	return a.secondsLeft(time.Now().UTC()), nil
 }
 
+// requireEarlierAnswered enforces a lock_forward paper's rule: every question
+// before orderIndex must already be answered.
+//
+// "Answered" matches what the player's palette shows as answered — a committed
+// selection or text for an MCQ or descriptive question, a judged submission for
+// a coding one. A saved coding draft deliberately does not count: writing code
+// into the editor is not solving the question.
+func (r *Repo) requireEarlierAnswered(ctx context.Context, attemptID string, orderIndex int32) error {
+	var pending int32
+	if err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(MIN(order_index), -1) FROM attempt_questions
+		WHERE  attempt_id = $1 AND order_index < $2
+		  AND  CASE WHEN kind = 'coding' THEN submission_id IS NULL
+		            ELSE cardinality(selected_options) = 0
+		                 AND COALESCE(btrim(text_answer), '') = ''
+		       END
+	`, attemptID, orderIndex).Scan(&pending); err != nil {
+		return fmt.Errorf("check sequential lock: %w", err)
+	}
+	if pending >= 0 {
+		return fmt.Errorf("answer question %d before moving on", pending+1)
+	}
+	return nil
+}
+
 // requireLiveAttempt is the single gate every write path goes through: right
 // owner, right status, deadline not passed. An attempt found past its deadline
 // is finalized here rather than left to drift.
@@ -922,18 +960,27 @@ func (r *Repo) requireLiveAttempt(ctx context.Context, attemptID, userID string)
 // AttemptCodingQuestion validates that a coding question belongs to this live
 // attempt and returns the problem id to grade against.
 func (r *Repo) AttemptCodingQuestion(ctx context.Context, attemptID, userID, questionID string) (problemID string, err error) {
-	if _, err := r.requireLiveAttempt(ctx, attemptID, userID); err != nil {
+	a, err := r.requireLiveAttempt(ctx, attemptID, userID)
+	if err != nil {
 		return "", err
 	}
+	var orderIndex int32
 	err = r.pool.QueryRow(ctx, `
-		SELECT COALESCE(problem_id::text, '') FROM attempt_questions
+		SELECT COALESCE(problem_id::text, ''), order_index FROM attempt_questions
 		WHERE id = $1 AND attempt_id = $2 AND kind = 'coding'
-	`, questionID, attemptID).Scan(&problemID)
+	`, questionID, attemptID).Scan(&problemID, &orderIndex)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", fmt.Errorf("lookup coding question: %w", err)
+	}
+	// Running the judge is how a coding question gets answered, so it is also
+	// where a sequential paper has to be enforced.
+	if a.LockForward {
+		if err := r.requireEarlierAnswered(ctx, attemptID, orderIndex); err != nil {
+			return "", err
+		}
 	}
 	if problemID == "" {
 		return "", fmt.Errorf("this question has no problem attached")

@@ -361,6 +361,7 @@ func attemptStateToMap(s *assessmentv1.AttemptState) map[string]interface{} {
 		"title":           s.Title,
 		"status":          s.Status,
 		"allowBacktrack":  s.AllowBacktrack,
+		"lockForward":     s.LockForward,
 		"proctoring":      proctoring,
 		"serverNow":       s.ServerNow,
 		"expiresAt":       s.ExpiresAt,

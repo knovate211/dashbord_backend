@@ -31,13 +31,14 @@ func (r *Repo) CreateAssessment(ctx context.Context, req *assessmentv1.CreateAss
 		INSERT INTO assessments (
 			company_id, title, description, purpose, duration_minutes, passing_marks,
 			negative_marking, shuffle_questions, shuffle_options, allow_backtrack,
-			reveal_results, proctoring, opens_at, closes_at, max_attempts, created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			lock_forward, reveal_results, proctoring, opens_at, closes_at,
+			max_attempts, created_by)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		RETURNING id
 	`,
 		nullable(a.CompanyId), a.Title, a.Description, defaultStr(a.Purpose, "practice"),
 		a.DurationMinutes, a.PassingMarks, a.NegativeMarking, a.ShuffleQuestions,
-		a.ShuffleOptions, a.AllowBacktrack, a.RevealResults, proctoring,
+		a.ShuffleOptions, a.AllowBacktrack, a.LockForward, a.RevealResults, proctoring,
 		parseTime(a.OpensAt), parseTime(a.ClosesAt), maxInt32(a.MaxAttempts, 1), req.ActorId,
 	).Scan(&id)
 	if err != nil {
@@ -91,10 +92,11 @@ func (r *Repo) UpdateAssessment(ctx context.Context, req *assessmentv1.UpdateAss
 			duration_minutes = CASE WHEN $4 > 0 THEN $4 ELSE duration_minutes END,
 			passing_marks    = CASE WHEN $5 > 0 THEN $5 ELSE passing_marks END,
 			negative_marking = CASE WHEN $6 > 0 THEN $6 ELSE negative_marking END,
-			shuffle_questions = CASE WHEN $15 THEN $7  ELSE shuffle_questions END,
-			shuffle_options   = CASE WHEN $15 THEN $8  ELSE shuffle_options   END,
-			allow_backtrack   = CASE WHEN $15 THEN $9  ELSE allow_backtrack   END,
-			reveal_results    = CASE WHEN $15 THEN $10 ELSE reveal_results    END,
+			shuffle_questions = CASE WHEN $16 THEN $7  ELSE shuffle_questions END,
+			shuffle_options   = CASE WHEN $16 THEN $8  ELSE shuffle_options   END,
+			allow_backtrack   = CASE WHEN $16 THEN $9  ELSE allow_backtrack   END,
+			lock_forward      = CASE WHEN $16 THEN $15 ELSE lock_forward      END,
+			reveal_results    = CASE WHEN $16 THEN $10 ELSE reveal_results    END,
 			proctoring       = COALESCE($11::jsonb, proctoring),
 			opens_at         = COALESCE($12, opens_at),
 			closes_at        = COALESCE($13, closes_at),
@@ -104,7 +106,7 @@ func (r *Repo) UpdateAssessment(ctx context.Context, req *assessmentv1.UpdateAss
 	`, a.Id, a.Title, a.Description, a.DurationMinutes, a.PassingMarks,
 		a.NegativeMarking, a.ShuffleQuestions, a.ShuffleOptions, a.AllowBacktrack,
 		a.RevealResults, proctoring, parseTime(a.OpensAt), parseTime(a.ClosesAt),
-		a.MaxAttempts,
+		a.MaxAttempts, a.LockForward,
 		// "The caller sent the whole assessment" — the admin editor always
 		// includes the title, so its presence is what distinguishes a full save
 		// from a one-field patch.
@@ -130,7 +132,8 @@ func (r *Repo) GetAssessment(ctx context.Context, id string, includeKey bool) (*
 	err := r.pool.QueryRow(ctx, `
 		SELECT a.id, a.company_id::text, c.name, a.title, a.description, a.purpose,
 		       a.duration_minutes, a.total_marks, a.passing_marks, a.negative_marking,
-		       a.shuffle_questions, a.shuffle_options, a.allow_backtrack, a.reveal_results,
+		       a.shuffle_questions, a.shuffle_options, a.allow_backtrack, a.lock_forward,
+		       a.reveal_results,
 		       a.proctoring, a.status, a.opens_at, a.closes_at, a.max_attempts,
 		       a.created_by::text, a.created_at, a.updated_at
 		FROM   assessments a
@@ -138,7 +141,8 @@ func (r *Repo) GetAssessment(ctx context.Context, id string, includeKey bool) (*
 		WHERE  a.id = $1
 	`, id).Scan(&a.Id, &companyID, &companyName, &a.Title, &a.Description, &a.Purpose,
 		&a.DurationMinutes, &a.TotalMarks, &a.PassingMarks, &a.NegativeMarking,
-		&a.ShuffleQuestions, &a.ShuffleOptions, &a.AllowBacktrack, &a.RevealResults,
+		&a.ShuffleQuestions, &a.ShuffleOptions, &a.AllowBacktrack, &a.LockForward,
+		&a.RevealResults,
 		&proctoring, &a.Status, &opensAt, &closesAt, &a.MaxAttempts,
 		&a.CreatedBy, &createdAt, &updatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

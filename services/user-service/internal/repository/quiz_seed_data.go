@@ -24,7 +24,7 @@ type quizKey struct {
 	correctAns string
 }
 
-// quizAnswerKeys holds 782 answer keys across 139 modules.
+// quizAnswerKeys holds 806 answer keys across 143 modules.
 var quizAnswerKeys = []quizKey{
 	// dm-m1 (5 questions)
 	{"dm-m1", 1, "It is a conversion problem, so more traffic will not help"},
@@ -830,6 +830,38 @@ var quizAnswerKeys = []quizKey{
 
 	// java-m9-assignment (1 questions)
 	{"java-m9-assignment", 1, "B. throw is used to explicitly throw a single exception instance; throws is used in method signatures to declare exceptions that might be thrown."},
+
+	// networking-m1 (6 questions)
+	{"networking-m1", 1, "Latency and bandwidth are independent — each keystroke still waits a full round trip regardless of capacity"},
+	{"networking-m1", 2, "The MAC addresses change at every hop; the IP addresses stay the same end to end"},
+	{"networking-m1", 3, "The logical topology — a switch forwards each frame only to the destination port, so each port becomes its own collision domain"},
+	{"networking-m1", 4, "Data traffic is bursty, so statistical multiplexing lets idle moments carry other users' traffic"},
+	{"networking-m1", 5, "The TCP window must hold at least 12.5 MB of unacknowledged data or the sender stalls and cannot fill the link"},
+	{"networking-m1", 6, "Every peer is also uploading, so supply grows with demand rather than being fixed"},
+
+	// networking-m1-assignment (6 questions)
+	{"networking-m1-assignment", 1, "The TCP window is smaller than the bandwidth-delay product, so the sender stalls waiting for ACKs"},
+	{"networking-m1-assignment", 2, "About 12.5 MB — bandwidth in bytes per second multiplied by the round-trip time"},
+	{"networking-m1-assignment", 3, "A leaf cable failing in a star"},
+	{"networking-m1-assignment", 4, "The source and destination IP addresses stay the same throughout; the MAC addresses are rewritten at every hop"},
+	{"networking-m1-assignment", 5, "It takes roughly 1.18 seconds — latency is per round trip and no amount of bandwidth reduces it"},
+	{"networking-m1-assignment", 6, "About 1000 — statistical multiplexing shares the idle time between users"},
+
+	// os-m1 (6 questions)
+	{"os-m1", 1, "To enforce, in hardware, that ordinary processes cannot execute privileged instructions or touch kernel memory"},
+	{"os-m1", 2, "The driver needed to read the root filesystem may itself live on the root filesystem, so a temporary in-memory root breaks the circular dependency"},
+	{"os-m1", 3, "A controlled entry into kernel mode at a fixed entry point, used to request privileged work"},
+	{"os-m1", 4, "Monolithic kernels are faster because subsystems call each other directly; microkernels isolate failures at the cost of IPC overhead"},
+	{"os-m1", 5, "The MMU detected an access the page permissions forbid and faulted; the kernel terminated the process"},
+	{"os-m1", 6, "Exactly one — PID 1 — which then starts everything else"},
+
+	// os-m1-assignment (6 questions)
+	{"os-m1-assignment", 1, "100,000 unbuffered and 25 buffered — the buffer flushes only when full"},
+	{"os-m1-assignment", 2, "strace, which prints every syscall with its arguments and return value"},
+	{"os-m1-assignment", 3, "Firmware or hardware — nothing has got as far as the bootloader"},
+	{"os-m1-assignment", 4, "The MMU refuses the access at execution time and raises a fault; the kernel then delivers SIGSEGV"},
+	{"os-m1-assignment", 5, "Nothing is wrong — page cache is reclaimable, so look at the available column rather than free"},
+	{"os-m1-assignment", 6, "No — modules still run in kernel mode with full privileges; only the loading is dynamic"},
 
 	// seo-m1 (5 questions)
 	{"seo-m1", 1, "Crawling, indexing, serving"},

@@ -114,6 +114,8 @@ const RECORD_COURSES = [
   ['golang', 'modules/GolangCourse/GolangCourseData.ts', 'GOLANG_COURSE_DATA'],
   ['fullstack', 'modules/FullStackCourse/FullstackCourseData.ts', 'FULLSTACK_COURSE_DATA'],
   ['genai', 'modules/GenAICourse/GenAICourseData.ts', 'GENAI_COURSE_DATA'],
+  ['os', 'modules/OsCourse/OsCourseData.ts', 'OS_COURSE_DATA'],
+  ['networking', 'modules/NetworkingCourse/NetworkingCourseData.ts', 'NETWORKING_COURSE_DATA'],
 ];
 
 for (const [prefix, file, exportName] of RECORD_COURSES) {
