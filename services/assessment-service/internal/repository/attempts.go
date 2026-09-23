@@ -113,6 +113,11 @@ func (r *Repo) ListAvailableAssessments(ctx context.Context, req *assessmentv1.L
 		       ON i.assessment_id = a.id AND lower(i.email) = lower($2)
 		WHERE  a.status = 'published'
 		  AND  (a.purpose = 'practice' OR i.id IS NOT NULL)
+		  -- A practice test aimed at particular courses is shown only to
+		  -- students enrolled in one of them (see practiceAudienceOK).
+		  AND  (a.purpose <> 'practice' OR cardinality(a.course_ids) = 0
+		        OR EXISTS (SELECT 1 FROM user_courses uc
+		                   WHERE uc.user_id = $1 AND uc.course_id = ANY(a.course_ids)))
 		ORDER  BY (a.purpose IN ('hiring', 'scholarship')) DESC, a.created_at DESC
 	`, req.UserId, email)
 	if err != nil {
@@ -228,6 +233,13 @@ func (r *Repo) StartAttempt(ctx context.Context, req *assessmentv1.StartAttemptR
 	}
 	if closes := parseTimeValue(a.ClosesAt); closes != nil && now.After(*closes) {
 		return "", fmt.Errorf("this test has closed")
+	}
+
+	// Course audience for practice tests. The listing hides a test from
+	// students outside its courses; this stops the same test being started by
+	// id or a shared link.
+	if err := r.practiceAudienceOK(ctx, a, req.UserId); err != nil {
+		return "", err
 	}
 
 	// Invite check for hiring drives.
@@ -347,6 +359,24 @@ func initialGradingStatus(kind string) string {
 // them.
 func resultsWithheld(purpose string) bool {
 	return strings.EqualFold(strings.TrimSpace(purpose), "scholarship")
+}
+
+// practiceAudienceOK allows a practice test with no course list to everyone,
+// and one with a course list only to students enrolled in one of its courses.
+func (r *Repo) practiceAudienceOK(ctx context.Context, a *assessmentv1.Assessment, userID string) error {
+	if inviteOnly(a.Purpose) || a.CourseIds == nil || len(*a.CourseIds) == 0 {
+		return nil
+	}
+	var ok bool
+	if err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM user_courses WHERE user_id::text = $1 AND course_id = ANY($2))
+	`, userID, *a.CourseIds).Scan(&ok); err != nil {
+		return fmt.Errorf("check course enrolment: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("this test is only open to students of its course")
+	}
+	return nil
 }
 
 func inviteOnly(purpose string) bool {
@@ -500,6 +530,13 @@ func (r *Repo) drawFromBank(ctx context.Context, companyID string, s *assessment
 		add("(company_id = $%d OR company_id IS NULL)", companyID)
 	} else {
 		clauses = append(clauses, "company_id IS NULL")
+	}
+	switch s.PickCourse {
+	case "": // any course
+	case assessmentv1.McqGeneralCourse:
+		clauses = append(clauses, "course_id = ''")
+	default:
+		add("course_id = $%d", s.PickCourse)
 	}
 	if s.PickTopic != "" {
 		add("topic = $%d", s.PickTopic)

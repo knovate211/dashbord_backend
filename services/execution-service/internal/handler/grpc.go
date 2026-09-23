@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/knovate211/execution-service/internal/codegen"
 	"github.com/knovate211/execution-service/internal/judge"
 	"github.com/knovate211/execution-service/internal/sandbox"
 	"github.com/knovate211/execution-service/internal/worker"
@@ -40,11 +41,49 @@ func (h *ExecutionHandler) RunCode(ctx context.Context, req *executionv1.RunCode
 	if err := validateRunRequest(req); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	return h.runCases(ctx, req, false)
+}
 
-	// Fetch visible test cases only
+// VerifySolution runs code against every test case, hidden ones included. It
+// backs the admin problem editor's "check solution" button: a problem is only
+// trustworthy once a known-good solution passes all of its cases, including
+// the ones learners never see. The gateway exposes it to admins only.
+func (h *ExecutionHandler) VerifySolution(ctx context.Context, req *executionv1.VerifySolutionRequest) (*executionv1.RunCodeResponse, error) {
+	run := &executionv1.RunCodeRequest{ProblemId: req.ProblemId, Language: req.Language, Code: req.Code}
+	if err := validateRunRequest(run); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	return h.runCases(ctx, run, true)
+}
+
+// GenerateStarters renders the starter template for every supported language
+// from a function-mode signature — the same generator the judge's drivers come
+// from, so a starter and the driver wrapped around it always agree.
+func (h *ExecutionHandler) GenerateStarters(ctx context.Context, req *executionv1.GenerateStartersRequest) (*executionv1.GenerateStartersResponse, error) {
+	sig := codegen.Signature{EntryPoint: strings.TrimSpace(req.EntryPoint), ReturnType: codegen.Type(req.ReturnType)}
+	for _, p := range req.Params {
+		sig.Params = append(sig.Params, codegen.Param{Name: strings.TrimSpace(p.Name), Type: codegen.Type(p.Type)})
+	}
+	if err := sig.Validate(); err != nil {
+		return &executionv1.GenerateStartersResponse{Error: strings.TrimPrefix(err.Error(), "codegen: ")}, nil
+	}
+	out := &executionv1.GenerateStartersResponse{Starters: map[string]string{}}
+	for _, lang := range []string{codegen.LangJavaScript, codegen.LangPython, codegen.LangJava, codegen.LangCpp, codegen.LangGo} {
+		code, err := codegen.Starter(lang, sig)
+		if err != nil {
+			return &executionv1.GenerateStartersResponse{Error: strings.TrimPrefix(err.Error(), "codegen: ")}, nil
+		}
+		out.Starters[lang] = code
+	}
+	return out, nil
+}
+
+// runCases executes code against a problem's test cases — visible ones only
+// unless includeHidden — and grades each synchronously.
+func (h *ExecutionHandler) runCases(ctx context.Context, req *executionv1.RunCodeRequest, includeHidden bool) (*executionv1.RunCodeResponse, error) {
 	tcResp, err := h.probCli.GetTestCases(ctx, &problemv1.GetTestCasesRequest{
 		ProblemId:     req.ProblemId,
-		IncludeHidden: false,
+		IncludeHidden: includeHidden,
 	})
 	if err != nil {
 		h.log.Error("fetch test cases for run", zap.Error(err))

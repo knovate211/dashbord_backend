@@ -216,12 +216,14 @@ func (h *RecruiterHandler) addCompanyMember(w http.ResponseWriter, r *http.Reque
 func (h *RecruiterHandler) listMcq(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	resp, err := h.AssessmentSvc.ListMcqQuestions(r.Context(), &assessmentv1.ListMcqQuestionsRequest{
-		CompanyId:  q.Get("companyId"),
-		Topic:      q.Get("topic"),
-		Difficulty: q.Get("difficulty"),
-		Search:     q.Get("search"),
-		Page:       intQuery(q.Get("page"), 1),
-		PageSize:   intQuery(q.Get("pageSize"), 50),
+		CompanyId:      q.Get("companyId"),
+		CourseId:       q.Get("course"),
+		IncludeRetired: q.Get("includeRetired") == "true",
+		Topic:          q.Get("topic"),
+		Difficulty:     q.Get("difficulty"),
+		Search:         q.Get("search"),
+		Page:           intQuery(q.Get("page"), 1),
+		PageSize:       intQuery(q.Get("pageSize"), 50),
 	})
 	h.respond(w, resp, err, "could not load the question bank")
 }

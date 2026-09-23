@@ -76,8 +76,11 @@ type McqOption struct {
 }
 
 type McqQuestion struct {
-	Id          string       `json:"id,omitempty"`
-	CompanyId   string       `json:"company_id,omitempty"` // empty = platform bank
+	Id        string `json:"id,omitempty"`
+	CompanyId string `json:"company_id,omitempty"` // empty = platform bank
+	// CourseId ties the question to one course ('5', 'genai', …); empty is a
+	// general question usable by any course.
+	CourseId    string       `json:"course_id"`
 	Topic       string       `json:"topic"`
 	Difficulty  string       `json:"difficulty"` // Easy | Medium | Hard
 	Body        string       `json:"body"`
@@ -99,13 +102,22 @@ type UpsertMcqQuestionResponse struct {
 }
 
 type ListMcqQuestionsRequest struct {
-	CompanyId  string `json:"company_id,omitempty"`
-	Topic      string `json:"topic,omitempty"`
-	Difficulty string `json:"difficulty,omitempty"`
-	Search     string `json:"search,omitempty"`
-	Page       int32  `json:"page"`
-	PageSize   int32  `json:"page_size"`
+	CompanyId string `json:"company_id,omitempty"`
+	// CourseId filters to one course; McqGeneralCourse selects the general
+	// (course-less) questions; empty means every course.
+	CourseId string `json:"course_id,omitempty"`
+	// IncludeRetired also returns deleted (soft-deleted) questions.
+	IncludeRetired bool   `json:"include_retired,omitempty"`
+	Topic          string `json:"topic,omitempty"`
+	Difficulty     string `json:"difficulty,omitempty"`
+	Search         string `json:"search,omitempty"`
+	Page           int32  `json:"page"`
+	PageSize       int32  `json:"page_size"`
 }
+
+// McqGeneralCourse is the ListMcqQuestionsRequest.CourseId value that selects
+// questions with no course. An empty CourseId already means "no filter".
+const McqGeneralCourse = "__general"
 
 type ListMcqQuestionsResponse struct {
 	Questions []*McqQuestion `json:"questions"`
@@ -165,8 +177,10 @@ type Section struct {
 	// PickCount > 0 draws that many questions per attempt: from the explicit
 	// question list when it is non-empty, otherwise from the MCQ bank filtered
 	// by PickTopic/PickDifficulty.
-	PickCount      int32              `json:"pick_count,omitempty"`
-	PickTopic      string             `json:"pick_topic,omitempty"`
+	PickCount int32  `json:"pick_count,omitempty"`
+	PickTopic string `json:"pick_topic,omitempty"`
+	// PickCourse limits the bank draw to one course's questions; empty = any.
+	PickCourse     string             `json:"pick_course,omitempty"`
 	PickDifficulty string             `json:"pick_difficulty,omitempty"`
 	PickMarks      int32              `json:"pick_marks,omitempty"`
 	PartialCredit  bool               `json:"partial_credit"`
@@ -203,7 +217,11 @@ type Assessment struct {
 
 	// Read-only rollups used by list views.
 	QuestionCount int32 `json:"question_count,omitempty"`
-	AttemptCount  int32 `json:"attempt_count,omitempty"`
+	// CourseIds limits a practice test to students enrolled in one of these
+	// courses; empty means every student. A pointer so an update can tell
+	// "not sent" (keep) from "sent empty" (open to everyone).
+	CourseIds    *[]string `json:"course_ids,omitempty"`
+	AttemptCount int32     `json:"attempt_count,omitempty"`
 }
 
 type CreateAssessmentRequest struct {

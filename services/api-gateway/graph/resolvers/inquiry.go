@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -242,25 +243,7 @@ func (h *InquiryHandler) ListInquiries(w http.ResponseWriter, r *http.Request) {
 		pageSize = 50
 	}
 
-	var clauses []string
-	var args []any
-	if s := q.Get("status"); s != "" {
-		args = append(args, s)
-		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
-	}
-	if s := q.Get("source"); s != "" {
-		args = append(args, s)
-		clauses = append(clauses, fmt.Sprintf("source = $%d", len(args)))
-	}
-	if s := q.Get("search"); s != "" {
-		args = append(args, s)
-		clauses = append(clauses, fmt.Sprintf(
-			"(name ILIKE '%%' || $%d || '%%' OR email ILIKE '%%' || $%d || '%%')", len(args), len(args)))
-	}
-	where := ""
-	if len(clauses) > 0 {
-		where = "WHERE " + strings.Join(clauses, " AND ")
-	}
+	where, args := inquiryWhere(q)
 
 	var total int
 	if err := h.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM inquiries "+where, args...).Scan(&total); err != nil {
@@ -300,6 +283,43 @@ func (h *InquiryHandler) ListInquiries(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"inquiries": out, "total": total, "page": page, "pageSize": pageSize,
 	})
+}
+
+// inquiryWhere builds the filter clause shared by the enquiry list, its CSV
+// export and the bulk actions, so "delete all matching" removes exactly the
+// rows the admin was looking at.
+func inquiryWhere(q url.Values) (string, []any) {
+	var clauses []string
+	var args []any
+	add := func(format string, v any) {
+		args = append(args, v)
+		clauses = append(clauses, fmt.Sprintf(format, len(args)))
+	}
+	if s := q.Get("status"); s != "" {
+		add("status = $%d", s)
+	}
+	if s := q.Get("source"); s != "" {
+		add("source = $%d", s)
+	}
+	if s := q.Get("interest"); s != "" {
+		add("interest = $%d", s)
+	}
+	if s := strings.TrimSpace(q.Get("search")); s != "" {
+		args = append(args, s)
+		clauses = append(clauses, fmt.Sprintf(
+			"(name ILIKE '%%' || $%d || '%%' OR email ILIKE '%%' || $%d || '%%' OR phone ILIKE '%%' || $%d || '%%')",
+			len(args), len(args), len(args)))
+	}
+	if d, err := time.Parse("2006-01-02", q.Get("from")); err == nil {
+		add("created_at >= $%d", d)
+	}
+	if d, err := time.Parse("2006-01-02", q.Get("to")); err == nil {
+		add("created_at < $%d", d.AddDate(0, 0, 1))
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
 }
 
 // UpdateInquiry backs PATCH /api/admin/inquiries/{id} — status and notes only.

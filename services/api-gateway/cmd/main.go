@@ -147,6 +147,10 @@ func main() {
 			Pool:   adminPool,
 			Log:    log,
 			Mailer: resolvers.NewUserMailer(cfg.appBaseURL, log),
+			Exec:   executionv1.NewExecutionServiceClient(execConn),
+		}
+		if err := adminHandler.EnsureAuditTable(context.Background()); err != nil {
+			log.Error("admin audit table init failed — admin actions will not be logged", zap.Error(err))
 		}
 		mux.Handle("/api/admin/", adminHandler)
 		log.Info("admin REST endpoints registered at /api/admin/")
@@ -185,6 +189,18 @@ func main() {
 				time.Duration(envInt("SCHOLARSHIP_SWEEP_MIN", 15))*time.Minute)
 			log.Info("scholarship funnel registered at /api/scholarship/",
 				zap.String("app_base_url", cfg.appBaseURL))
+		}
+
+		// Live classes and attendance. Every route needs a signed-in user; the
+		// handler checks course enrolment itself, and the schedule screens sit
+		// under /api/admin/ behind the role guard.
+		attendanceHandler, err := resolvers.NewAttendanceHandler(context.Background(), adminPool, log)
+		if err != nil {
+			log.Error("attendance handler init failed — attendance disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/attendance/", attendanceHandler)
+			adminHandler.Attendance = attendanceHandler
+			log.Info("attendance registered at /api/attendance/")
 		}
 
 		// Self-service password reset. Public for the same reason as the

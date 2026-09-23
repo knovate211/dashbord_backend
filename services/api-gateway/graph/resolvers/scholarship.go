@@ -928,6 +928,14 @@ func applicationQuery(q url.Values) (base, where string, args []any) {
 				"(max_score > 0 AND (score / max_score) * 100 >= $%d)", len(args)))
 		}
 	}
+	if d, err := time.Parse("2006-01-02", q.Get("from")); err == nil {
+		args = append(args, d)
+		clauses = append(clauses, fmt.Sprintf("created_at >= $%d", len(args)))
+	}
+	if d, err := time.Parse("2006-01-02", q.Get("to")); err == nil {
+		args = append(args, d.AddDate(0, 0, 1))
+		clauses = append(clauses, fmt.Sprintf("created_at < $%d", len(args)))
+	}
 	if len(clauses) > 0 {
 		where = "WHERE " + strings.Join(clauses, " AND ")
 	}
@@ -1174,63 +1182,14 @@ func (h *ScholarshipHandler) DeleteApplication(w http.ResponseWriter, r *http.Re
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	var email, userID, assessmentID string
-	if err := tx.QueryRow(ctx, `
-		SELECT email, COALESCE(user_id::text, ''), COALESCE(assessment_id::text, '')
-		FROM   scholarship_applications WHERE id = $1::uuid
-	`, id).Scan(&email, &userID, &assessmentID); errors.Is(err, pgx.ErrNoRows) {
+	email, accountRemoved, err := h.deleteApplicationTx(ctx, tx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
 		h.fail(w, http.StatusNotFound, "application not found")
 		return
 	} else if err != nil {
-		h.Log.Error("load application for delete failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not delete the application")
-		return
-	}
-
-	if _, err := tx.Exec(ctx, `DELETE FROM scholarship_applications WHERE id = $1::uuid`, id); err != nil {
 		h.Log.Error("delete application failed", zap.Error(err))
 		h.fail(w, http.StatusInternalServerError, "could not delete the application")
 		return
-	}
-
-	if assessmentID != "" {
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM assessment_invites WHERE assessment_id = $1::uuid AND lower(email) = lower($2)
-		`, assessmentID, email); err != nil {
-			h.Log.Error("delete invite failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not delete the application")
-			return
-		}
-	}
-	if assessmentID != "" && userID != "" {
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM attempts WHERE assessment_id = $1::uuid AND user_id = $2::uuid
-		`, assessmentID, userID); err != nil {
-			h.Log.Error("delete attempts failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not delete the application")
-			return
-		}
-	}
-
-	// Only an account this funnel created and nothing else depends on.
-	// user_profiles, user_courses and the rest cascade from users.
-	accountRemoved := false
-	if userID != "" {
-		tag, err := tx.Exec(ctx, `
-			DELETE FROM users u
-			 WHERE u.id = $1::uuid
-			   AND u.role = 'applicant'
-			   AND u.password LIKE '$2a$unusable$%'
-			   AND NOT EXISTS (SELECT 1 FROM user_courses c WHERE c.user_id = u.id)
-			   AND NOT EXISTS (SELECT 1 FROM scholarship_applications s WHERE s.user_id = u.id)
-			   AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.user_id = u.id)
-		`, userID)
-		if err != nil {
-			h.Log.Error("delete provisioned account failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not delete the application")
-			return
-		}
-		accountRemoved = tag.RowsAffected() > 0
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1248,6 +1207,58 @@ func (h *ScholarshipHandler) DeleteApplication(w http.ResponseWriter, r *http.Re
 		"email":          email,
 		"accountRemoved": accountRemoved,
 	})
+}
+
+// deleteApplicationTx removes one application with everything the funnel
+// created for it: the invite, the attempts, and the applicant account when
+// nothing else depends on it. It runs inside the caller's transaction so a bulk
+// delete is all-or-nothing. Returns pgx.ErrNoRows when the id does not exist.
+func (h *ScholarshipHandler) deleteApplicationTx(ctx context.Context, tx pgx.Tx, id string) (email string, accountRemoved bool, err error) {
+	var userID, assessmentID string
+	if err = tx.QueryRow(ctx, `
+		SELECT email, COALESCE(user_id::text, ''), COALESCE(assessment_id::text, '')
+		FROM   scholarship_applications WHERE id = $1::uuid
+	`, id).Scan(&email, &userID, &assessmentID); err != nil {
+		return "", false, err
+	}
+
+	if _, err = tx.Exec(ctx, `DELETE FROM scholarship_applications WHERE id = $1::uuid`, id); err != nil {
+		return "", false, fmt.Errorf("delete application: %w", err)
+	}
+
+	if assessmentID != "" {
+		if _, err = tx.Exec(ctx, `
+			DELETE FROM assessment_invites WHERE assessment_id = $1::uuid AND lower(email) = lower($2)
+		`, assessmentID, email); err != nil {
+			return "", false, fmt.Errorf("delete invite: %w", err)
+		}
+	}
+	if assessmentID != "" && userID != "" {
+		if _, err = tx.Exec(ctx, `
+			DELETE FROM attempts WHERE assessment_id = $1::uuid AND user_id = $2::uuid
+		`, assessmentID, userID); err != nil {
+			return "", false, fmt.Errorf("delete attempts: %w", err)
+		}
+	}
+
+	// Only an account this funnel created and nothing else depends on.
+	// user_profiles, user_courses and the rest cascade from users.
+	if userID != "" {
+		tag, err := tx.Exec(ctx, `
+			DELETE FROM users u
+			 WHERE u.id = $1::uuid
+			   AND u.role = 'applicant'
+			   AND u.password LIKE '$2a$unusable$%'
+			   AND NOT EXISTS (SELECT 1 FROM user_courses c WHERE c.user_id = u.id)
+			   AND NOT EXISTS (SELECT 1 FROM scholarship_applications s WHERE s.user_id = u.id)
+			   AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.user_id = u.id)
+		`, userID)
+		if err != nil {
+			return "", false, fmt.Errorf("delete provisioned account: %w", err)
+		}
+		accountRemoved = tag.RowsAffected() > 0
+	}
+	return email, accountRemoved, nil
 }
 
 // ResendLink backs POST /api/admin/scholarships/{id}/resend.

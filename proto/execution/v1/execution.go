@@ -33,12 +33,12 @@ type TestResult struct {
 }
 
 type RunCodeResponse struct {
-	JobId        string        `json:"job_id"`
-	OverallStatus string       `json:"overall_status"`
-	TestResults  []*TestResult `json:"test_results"`
-	CompileError string        `json:"compile_error,omitempty"`
-	Runtime      int64         `json:"runtime_ms"`
-	Memory       int64         `json:"memory_kb"`
+	JobId         string        `json:"job_id"`
+	OverallStatus string        `json:"overall_status"`
+	TestResults   []*TestResult `json:"test_results"`
+	CompileError  string        `json:"compile_error,omitempty"`
+	Runtime       int64         `json:"runtime_ms"`
+	Memory        int64         `json:"memory_kb"`
 }
 
 // RunScratchpadRequest executes code verbatim against supplied stdin, with no
@@ -85,15 +85,55 @@ type ExecutionResult struct {
 	Memory        int64         `json:"memory_kb"`
 }
 
+// GenerateStartersRequest describes a function-mode signature. The execution
+// service owns the code generator, so the admin authoring screen asks it for
+// the starter templates rather than duplicating the generator.
+type GenerateStartersRequest struct {
+	EntryPoint string          `json:"entry_point"`
+	Params     []*StarterParam `json:"params"`
+	ReturnType string          `json:"return_type"`
+}
+
+type StarterParam struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// GenerateStartersResponse maps language → starter. Error is set (and
+// Starters empty) when the signature cannot be generated, e.g. an unknown type.
+type GenerateStartersResponse struct {
+	Starters map[string]string `json:"starters"`
+	Error    string            `json:"error,omitempty"`
+}
+
+// VerifySolutionRequest runs code against ALL of a problem's test cases,
+// hidden ones included, and returns per-case results synchronously. It is for
+// problem authors checking a reference solution — never exposed to learners,
+// because it reveals hidden test data.
+type VerifySolutionRequest struct {
+	ProblemId string `json:"problem_id"`
+	Language  string `json:"language"`
+	Code      string `json:"code"`
+}
+
 // ─── Server Interface ─────────────────────────────────────────────────────────
 
 type ExecutionServiceServer interface {
 	RunCode(context.Context, *RunCodeRequest) (*RunCodeResponse, error)
 	RunScratchpad(context.Context, *RunScratchpadRequest) (*RunScratchpadResponse, error)
 	SubmitCode(context.Context, *SubmitCodeRequest) (*SubmitCodeResponse, error)
+	GenerateStarters(context.Context, *GenerateStartersRequest) (*GenerateStartersResponse, error)
+	VerifySolution(context.Context, *VerifySolutionRequest) (*RunCodeResponse, error)
 }
 
 type UnimplementedExecutionServiceServer struct{}
+
+func (UnimplementedExecutionServiceServer) GenerateStarters(context.Context, *GenerateStartersRequest) (*GenerateStartersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GenerateStarters not implemented")
+}
+func (UnimplementedExecutionServiceServer) VerifySolution(context.Context, *VerifySolutionRequest) (*RunCodeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VerifySolution not implemented")
+}
 
 func (UnimplementedExecutionServiceServer) RunCode(context.Context, *RunCodeRequest) (*RunCodeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RunCode not implemented")
@@ -111,6 +151,8 @@ type ExecutionServiceClient interface {
 	RunCode(ctx context.Context, in *RunCodeRequest, opts ...grpc.CallOption) (*RunCodeResponse, error)
 	RunScratchpad(ctx context.Context, in *RunScratchpadRequest, opts ...grpc.CallOption) (*RunScratchpadResponse, error)
 	SubmitCode(ctx context.Context, in *SubmitCodeRequest, opts ...grpc.CallOption) (*SubmitCodeResponse, error)
+	GenerateStarters(ctx context.Context, in *GenerateStartersRequest, opts ...grpc.CallOption) (*GenerateStartersResponse, error)
+	VerifySolution(ctx context.Context, in *VerifySolutionRequest, opts ...grpc.CallOption) (*RunCodeResponse, error)
 }
 
 type executionServiceClient struct{ cc grpc.ClientConnInterface }
@@ -143,6 +185,22 @@ func (c *executionServiceClient) SubmitCode(ctx context.Context, in *SubmitCodeR
 	return out, nil
 }
 
+func (c *executionServiceClient) GenerateStarters(ctx context.Context, in *GenerateStartersRequest, opts ...grpc.CallOption) (*GenerateStartersResponse, error) {
+	out := new(GenerateStartersResponse)
+	if err := c.cc.Invoke(ctx, "/execution.v1.ExecutionService/GenerateStarters", in, out, opts...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executionServiceClient) VerifySolution(ctx context.Context, in *VerifySolutionRequest, opts ...grpc.CallOption) (*RunCodeResponse, error) {
+	out := new(RunCodeResponse)
+	if err := c.cc.Invoke(ctx, "/execution.v1.ExecutionService/VerifySolution", in, out, opts...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ─── Service Registration & Descriptor ───────────────────────────────────────
 
 func RegisterExecutionServiceServer(s grpc.ServiceRegistrar, srv ExecutionServiceServer) {
@@ -156,6 +214,8 @@ var ExecutionService_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "RunCode", Handler: _ExecutionService_RunCode_Handler},
 		{MethodName: "RunScratchpad", Handler: _ExecutionService_RunScratchpad_Handler},
 		{MethodName: "SubmitCode", Handler: _ExecutionService_SubmitCode_Handler},
+		{MethodName: "GenerateStarters", Handler: _ExecutionService_GenerateStarters_Handler},
+		{MethodName: "VerifySolution", Handler: _ExecutionService_VerifySolution_Handler},
 	},
 	Streams: []grpc.StreamDesc{},
 }
@@ -199,5 +259,33 @@ func _ExecutionService_SubmitCode_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, &grpc.UnaryServerInfo{Server: srv, FullMethod: "/execution.v1.ExecutionService/SubmitCode"},
 		func(ctx context.Context, req interface{}) (interface{}, error) {
 			return srv.(ExecutionServiceServer).SubmitCode(ctx, req.(*SubmitCodeRequest))
+		})
+}
+
+func _ExecutionService_GenerateStarters_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GenerateStartersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionServiceServer).GenerateStarters(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{Server: srv, FullMethod: "/execution.v1.ExecutionService/GenerateStarters"},
+		func(ctx context.Context, req interface{}) (interface{}, error) {
+			return srv.(ExecutionServiceServer).GenerateStarters(ctx, req.(*GenerateStartersRequest))
+		})
+}
+
+func _ExecutionService_VerifySolution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifySolutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionServiceServer).VerifySolution(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{Server: srv, FullMethod: "/execution.v1.ExecutionService/VerifySolution"},
+		func(ctx context.Context, req interface{}) (interface{}, error) {
+			return srv.(ExecutionServiceServer).VerifySolution(ctx, req.(*VerifySolutionRequest))
 		})
 }

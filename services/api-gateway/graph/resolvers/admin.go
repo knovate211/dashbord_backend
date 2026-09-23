@@ -15,6 +15,7 @@ import (
 
 	"github.com/knovate211/api-gateway/middleware"
 	pkgauth "github.com/knovate211/pkg/auth"
+	executionv1 "github.com/knovate211/proto/execution/v1"
 )
 
 // AdminHandler handles /api/admin/* REST endpoints.
@@ -27,9 +28,14 @@ type AdminHandler struct {
 	// Scholarships serves the scholarship application and programme screens;
 	// nil disables those routes.
 	Scholarships *ScholarshipHandler
+	// Attendance serves live-class schedules and rosters; nil disables those routes.
+	Attendance *AttendanceHandler
 	// Mailer sends a new account its login details; nil sends nothing (the
 	// account is still created and its password still returned to the admin).
 	Mailer *userMailer
+	// Exec generates starter code and verifies reference solutions for the
+	// coding-problem editor; nil disables those two actions.
+	Exec executionv1.ExecutionServiceClient
 }
 
 // ServeHTTP dispatches admin REST routes.
@@ -58,6 +64,26 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// GET /api/admin/inquiries
 	case path == "/inquiries" && r.Method == http.MethodGet && h.Inquiries != nil:
 		h.Inquiries.ListInquiries(w, r)
+
+	// GET /api/admin/inquiries/facets — filter values with counts
+	case path == "/inquiries/facets" && r.Method == http.MethodGet && h.Inquiries != nil:
+		h.handleInquiryFacets(w, r)
+
+	// GET /api/admin/inquiries/export.csv — same filters as the table
+	case path == "/inquiries/export.csv" && r.Method == http.MethodGet && h.Inquiries != nil:
+		h.handleInquiryExport(w, r)
+
+	// POST /api/admin/inquiries/bulk — status change / delete
+	case path == "/inquiries/bulk" && r.Method == http.MethodPost && h.Inquiries != nil:
+		h.handleInquiryBulk(w, r)
+
+	// GET /api/admin/scholarships/facets — filter values with counts
+	case path == "/scholarships/facets" && r.Method == http.MethodGet && h.Scholarships != nil:
+		h.handleScholarshipFacets(w, r)
+
+	// POST /api/admin/scholarships/bulk — delete many applications
+	case path == "/scholarships/bulk" && r.Method == http.MethodPost && h.Scholarships != nil:
+		h.handleScholarshipBulk(w, r)
 
 	// PATCH /api/admin/inquiries/{id}   — status / notes
 	case strings.HasPrefix(path, "/inquiries/") && r.Method == http.MethodPatch && h.Inquiries != nil:
@@ -99,13 +125,79 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/scholarship-programs" && r.Method == http.MethodPost && h.Scholarships != nil:
 		h.Scholarships.UpsertProgram(w, r)
 
+	// GET /api/admin/classes — live-class schedules
+	case path == "/classes" && r.Method == http.MethodGet && h.Attendance != nil:
+		h.Attendance.ListSchedules(w, r)
+
+	// POST /api/admin/classes — schedule a recurring class
+	case path == "/classes" && r.Method == http.MethodPost && h.Attendance != nil:
+		h.Attendance.CreateSchedule(w, r)
+
+	// GET /api/admin/classes/{id}/attendance?date= — who marked that session
+	case strings.HasPrefix(path, "/classes/") && strings.HasSuffix(path, "/attendance") &&
+		r.Method == http.MethodGet && h.Attendance != nil:
+		inner := strings.TrimPrefix(path, "/classes/")
+		h.Attendance.SessionRoster(w, r, strings.TrimSuffix(inner, "/attendance"))
+
+	// PUT /api/admin/classes/{id}
+	case strings.HasPrefix(path, "/classes/") && r.Method == http.MethodPut && h.Attendance != nil:
+		h.Attendance.UpdateSchedule(w, r, strings.TrimPrefix(path, "/classes/"))
+
+	// DELETE /api/admin/classes/{id}
+	case strings.HasPrefix(path, "/classes/") && r.Method == http.MethodDelete && h.Attendance != nil:
+		h.Attendance.DeleteSchedule(w, r, strings.TrimPrefix(path, "/classes/"))
+
 	// GET /api/admin/courses — catalog for the admin UI dropdowns
 	case path == "/courses" && r.Method == http.MethodGet:
 		h.handleListCourses(w, r)
 
+	// GET /api/admin/stats — dashboard headline numbers
+	case path == "/stats" && r.Method == http.MethodGet:
+		h.handleStats(w, r)
+
+	// GET /api/admin/grading-queue — descriptive answers awaiting a mark
+	case path == "/grading-queue" && r.Method == http.MethodGet:
+		h.handleGradingQueue(w, r)
+
+	// POST /api/admin/tests/{id}/duplicate — copy a test as a new draft
+	case strings.HasPrefix(path, "/tests/") && strings.HasSuffix(path, "/duplicate") && r.Method == http.MethodPost:
+		h.handleDuplicateTest(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/tests/"), "/duplicate"))
+
+	// Coding problems — list / create / preview starters / read / update / delete / verify
+	case path == "/problems" && r.Method == http.MethodGet:
+		h.handleListProblems(w, r)
+	case path == "/problems" && r.Method == http.MethodPost:
+		h.handleSaveProblem(w, r, "")
+	case path == "/problems/starters" && r.Method == http.MethodPost:
+		h.handleProblemStarters(w, r)
+	case strings.HasPrefix(path, "/problems/") && strings.HasSuffix(path, "/verify") && r.Method == http.MethodPost:
+		h.handleVerifyProblem(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/problems/"), "/verify"))
+	case strings.HasPrefix(path, "/problems/") && !strings.Contains(path[len("/problems/"):], "/") && r.Method == http.MethodGet:
+		h.handleGetProblem(w, r, strings.TrimPrefix(path, "/problems/"))
+	case strings.HasPrefix(path, "/problems/") && !strings.Contains(path[len("/problems/"):], "/") && r.Method == http.MethodPut:
+		h.handleSaveProblem(w, r, strings.TrimPrefix(path, "/problems/"))
+	case strings.HasPrefix(path, "/problems/") && !strings.Contains(path[len("/problems/"):], "/") && r.Method == http.MethodDelete:
+		h.handleDeleteProblem(w, r, strings.TrimPrefix(path, "/problems/"))
+
+	// GET /api/admin/mcq-bank/facets — question counts per course / topic / difficulty
+	case path == "/mcq-bank/facets" && r.Method == http.MethodGet:
+		h.handleMcqFacets(w, r)
+
+	// GET /api/admin/audit — who changed what
+	case path == "/audit" && r.Method == http.MethodGet:
+		h.handleListAudit(w, r)
+
 	// GET /api/admin/users
 	case path == "/users" && r.Method == http.MethodGet:
 		h.handleListUsers(w, r)
+
+	// GET /api/admin/users/export.csv — same filters as the list
+	case path == "/users/export.csv" && r.Method == http.MethodGet:
+		h.handleExportUsers(w, r)
+
+	// POST /api/admin/users/bulk — role / course / delete over many users
+	case path == "/users/bulk" && r.Method == http.MethodPost:
+		h.handleBulkUsers(w, r)
 
 	// PATCH /api/admin/users/{id}   — update role
 	case strings.HasPrefix(path, "/users/") && !strings.Contains(path[len("/users/"):], "/") && r.Method == http.MethodPatch:
@@ -198,6 +290,9 @@ func (h *AdminHandler) handleBulkImport(w http.ResponseWriter, r *http.Request) 
 			successCount++
 		}
 	}
+	h.audit(r.Context(), "users.imported", "", "", map[string]interface{}{
+		"total": len(results), "success": successCount, "send_welcome": req.SendWelcome,
+	})
 
 	h.json(w, http.StatusOK, map[string]interface{}{
 		"total":   len(results),
@@ -211,15 +306,14 @@ func (h *AdminHandler) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	pageSize, _ := strconv.Atoi(q.Get("page_size"))
-	search := q.Get("search")
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 {
+	if pageSize < 1 || pageSize > 500 {
 		pageSize = 50
 	}
 
-	users, total, err := h.listUsers(r.Context(), page, pageSize, search)
+	users, total, err := h.listUsers(r.Context(), page, pageSize, userFiltersFromQuery(r))
 	if err != nil {
 		h.Log.Error("list admin users failed", zap.Error(err))
 		h.jsonErr(w, http.StatusInternalServerError, "failed to list users")
@@ -302,6 +396,20 @@ func (h *AdminHandler) handleUpdateUser(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	detail := map[string]interface{}{}
+	action := "user.updated"
+	if req.Role != nil {
+		detail["role"] = *req.Role
+		action = "user.role_changed"
+	}
+	for k, v := range map[string]*string{"name": req.Name, "email": req.Email, "phone": req.Phone} {
+		if v != nil {
+			detail[k] = *v
+			action = "user.updated"
+		}
+	}
+	h.audit(r.Context(), action, userID, h.emailOf(r.Context(), userID), detail)
+
 	h.json(w, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -327,6 +435,11 @@ func (h *AdminHandler) handleListCourses(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *AdminHandler) handleDeleteUser(w http.ResponseWriter, r *http.Request, userID string) {
+	if userID == middleware.UserIDFromContext(r.Context()) {
+		h.jsonErr(w, http.StatusBadRequest, "you cannot delete your own account")
+		return
+	}
+	email := h.emailOf(r.Context(), userID)
 	tag, err := h.Pool.Exec(r.Context(), `DELETE FROM users WHERE id = $1::uuid`, userID)
 	if err != nil {
 		h.Log.Error("delete user failed", zap.String("userID", userID), zap.Error(err))
@@ -337,6 +450,7 @@ func (h *AdminHandler) handleDeleteUser(w http.ResponseWriter, r *http.Request, 
 		h.jsonErr(w, http.StatusNotFound, "user not found")
 		return
 	}
+	h.audit(r.Context(), "user.deleted", userID, email, nil)
 	h.json(w, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -358,6 +472,8 @@ func (h *AdminHandler) handleGrantCourse(w http.ResponseWriter, r *http.Request,
 		h.jsonErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.audit(r.Context(), "course.granted", userID, h.emailOf(r.Context(), userID),
+		map[string]interface{}{"course_id": req.CourseID})
 	h.json(w, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -369,6 +485,8 @@ func (h *AdminHandler) handleRevokeCourse(w http.ResponseWriter, r *http.Request
 		h.jsonErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.audit(r.Context(), "course.revoked", userID, h.emailOf(r.Context(), userID),
+		map[string]interface{}{"course_id": courseID})
 	h.json(w, http.StatusOK, map[string]bool{"success": true})
 }
 
@@ -462,54 +580,32 @@ func (h *AdminHandler) bulkUpsertUsers(ctx context.Context, rows []importUserRow
 	return results
 }
 
-func (h *AdminHandler) listUsers(ctx context.Context, page, pageSize int, search string) ([]adminUserRow, int, error) {
+func (h *AdminHandler) listUsers(ctx context.Context, page, pageSize int, f userFilters) ([]adminUserRow, int, error) {
 	offset := (page - 1) * pageSize
 
-	// Scholarship applicants are excluded. They hold a users row because the
-	// assessment engine keys an attempt to a user id, but they are not on a
-	// course and nobody has enrolled them — showing them here would make the
-	// Users screen a list of everyone who ever filled in a form, and would put
-	// people in it that staff never added. They appear under Scholarship, and
-	// join this list when someone enrols them.
-	const notApplicant = `u.role <> 'applicant'`
+	// Scholarship applicants are excluded (by userFilters.where). They hold a
+	// users row because the assessment engine keys an attempt to a user id, but
+	// they are not on a course and nobody has enrolled them — showing them here
+	// would make the Users screen a list of everyone who ever filled in a form,
+	// and would put people in it that staff never added. They appear under
+	// Scholarship, and join this list when someone enrols them.
+	cond, args := f.where()
 
 	var total int
-	countQuery := `SELECT COUNT(*) FROM users u WHERE ` + notApplicant
-	countArgs := []interface{}{}
-	if search != "" {
-		countQuery = `SELECT COUNT(*) FROM users u WHERE ` + notApplicant +
-			` AND (u.email ILIKE $1 OR u.name ILIKE $1)`
-		countArgs = []interface{}{"%" + search + "%"}
-	}
-	if err := h.Pool.QueryRow(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+	if err := h.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM users u WHERE `+cond, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count users: %w", err)
 	}
 
-	var query string
-	var args []interface{}
-	if search != "" {
-		query = `
-			SELECT u.id::text, u.email, u.name, u.role, u.created_at,
-			       COALESCE(array_agg(uc.course_id) FILTER (WHERE uc.course_id IS NOT NULL), '{}') AS course_ids
-			FROM users u
-			LEFT JOIN user_courses uc ON uc.user_id = u.id
-			WHERE ` + notApplicant + ` AND (u.email ILIKE $3 OR u.name ILIKE $3)
-			GROUP BY u.id, u.email, u.name, u.role, u.created_at
-			ORDER BY u.created_at DESC
-			LIMIT $1 OFFSET $2`
-		args = []interface{}{pageSize, offset, "%" + search + "%"}
-	} else {
-		query = `
-			SELECT u.id::text, u.email, u.name, u.role, u.created_at,
-			       COALESCE(array_agg(uc.course_id) FILTER (WHERE uc.course_id IS NOT NULL), '{}') AS course_ids
-			FROM users u
-			LEFT JOIN user_courses uc ON uc.user_id = u.id
-			WHERE ` + notApplicant + `
-			GROUP BY u.id, u.email, u.name, u.role, u.created_at
-			ORDER BY u.created_at DESC
-			LIMIT $1 OFFSET $2`
-		args = []interface{}{pageSize, offset}
-	}
+	args = append(args, pageSize, offset)
+	query := fmt.Sprintf(`
+		SELECT u.id::text, u.email, u.name, u.role, u.created_at,
+		       COALESCE(array_agg(uc.course_id) FILTER (WHERE uc.course_id IS NOT NULL), '{}') AS course_ids
+		FROM users u
+		LEFT JOIN user_courses uc ON uc.user_id = u.id
+		WHERE %s
+		GROUP BY u.id, u.email, u.name, u.role, u.created_at
+		ORDER BY u.created_at DESC
+		LIMIT $%d OFFSET $%d`, cond, len(args)-1, len(args))
 
 	pgRows, err := h.Pool.Query(ctx, query, args...)
 	if err != nil {

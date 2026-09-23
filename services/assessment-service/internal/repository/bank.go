@@ -33,11 +33,12 @@ func (r *Repo) UpsertMcqQuestion(ctx context.Context, req *assessmentv1.UpsertMc
 	id := q.Id
 	if id == "" {
 		err = tx.QueryRow(ctx, `
-			INSERT INTO mcq_questions (company_id, topic, difficulty, body, kind, explanation, is_active, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+			INSERT INTO mcq_questions (company_id, topic, difficulty, body, kind, explanation, is_active, created_by, course_id)
+			VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)
 			RETURNING id
 		`, nullable(q.CompanyId), defaultStr(q.Topic, "General"), defaultStr(q.Difficulty, "Medium"),
-			q.Body, defaultStr(q.Kind, "single"), q.Explanation, nullable(req.ActorId)).Scan(&id)
+			q.Body, defaultStr(q.Kind, "single"), q.Explanation, nullable(req.ActorId),
+			strings.TrimSpace(q.CourseId)).Scan(&id)
 		if err != nil {
 			return "", fmt.Errorf("insert mcq question: %w", err)
 		}
@@ -45,10 +46,11 @@ func (r *Repo) UpsertMcqQuestion(ctx context.Context, req *assessmentv1.UpsertMc
 		ct, err := tx.Exec(ctx, `
 			UPDATE mcq_questions
 			SET    topic = $2, difficulty = $3, body = $4, kind = $5,
-			       explanation = $6, is_active = $7
+			       explanation = $6, is_active = $7, course_id = $8
 			WHERE  id = $1
 		`, id, defaultStr(q.Topic, "General"), defaultStr(q.Difficulty, "Medium"),
-			q.Body, defaultStr(q.Kind, "single"), q.Explanation, q.IsActive)
+			q.Body, defaultStr(q.Kind, "single"), q.Explanation, q.IsActive,
+			strings.TrimSpace(q.CourseId))
 		if err != nil {
 			return "", fmt.Errorf("update mcq question: %w", err)
 		}
@@ -120,6 +122,18 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 		// A company sees its own bank plus the shared platform bank.
 		add("(company_id = $%d OR company_id IS NULL)", req.CompanyId)
 	}
+	// Deleted questions are soft-deleted (see DeleteMcqQuestion); the bank
+	// screen should not keep showing them unless asked.
+	if !req.IncludeRetired {
+		clauses = append(clauses, "is_active = true")
+	}
+	switch req.CourseId {
+	case "":
+	case assessmentv1.McqGeneralCourse:
+		clauses = append(clauses, "course_id = ''")
+	default:
+		add("course_id = $%d", req.CourseId)
+	}
 	if req.Topic != "" {
 		add("topic = $%d", req.Topic)
 	}
@@ -141,7 +155,7 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, COALESCE(company_id::text, ''), topic, difficulty, body, kind,
+		SELECT id, COALESCE(company_id::text, ''), course_id, topic, difficulty, body, kind,
 		       explanation, is_active, created_at
 		FROM   mcq_questions %s
 		ORDER  BY created_at DESC
@@ -166,7 +180,7 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 	for rows.Next() {
 		q := &assessmentv1.McqQuestion{Options: []*assessmentv1.McqOption{}}
 		var created any
-		if err := rows.Scan(&q.Id, &q.CompanyId, &q.Topic, &q.Difficulty, &q.Body,
+		if err := rows.Scan(&q.Id, &q.CompanyId, &q.CourseId, &q.Topic, &q.Difficulty, &q.Body,
 			&q.Kind, &q.Explanation, &q.IsActive, &created); err != nil {
 			return nil, fmt.Errorf("scan mcq question: %w", err)
 		}

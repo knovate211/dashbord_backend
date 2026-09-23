@@ -80,6 +80,21 @@ function extractArrayLiteral(src, name) {
 
 const keys = {};
 
+/**
+ * Answer key for an assignment's MCQ tasks.
+ *
+ * ModuleAssignment numbers every task by its position in the FULL questions
+ * array and then drops the non-MCQ entries, so a written task before an MCQ
+ * shifts the ids. Keying off the filtered list would mis-grade those, so the
+ * index here is the position among all prompts.
+ */
+function assignmentMcqKeys(prompts) {
+  return prompts
+    .map((p, idx) => ({ p, id: idx + 1 }))
+    .filter(({ p }) => typeof p === 'object' && p.kind === 'mcq')
+    .map(({ p, id }) => ({ id, correctAnswer: p.correctAnswer }));
+}
+
 // ---------- Java ----------
 const java = loadModule(path.join(COURSES, 'modules/JavaCourse/JavaCourseData.ts'));
 for (const [modId, mod] of Object.entries(java.JAVA_COURSE_DATA)) {
@@ -87,9 +102,9 @@ for (const [modId, mod] of Object.entries(java.JAVA_COURSE_DATA)) {
     keys[`java-${modId}`] = mod.quiz.map((q) => ({ id: q.id, correctAnswer: q.correctAnswer }));
   }
   if (mod.assignment?.prompts?.length) {
-    const mcqPrompts = mod.assignment.prompts.filter(p => typeof p === 'object' && p.kind === 'mcq');
-    if (mcqPrompts.length > 0) {
-      keys[`java-${modId}-assignment`] = mcqPrompts.map((q, idx) => ({ id: idx + 1, correctAnswer: q.correctAnswer }));
+    const mcqKeys = assignmentMcqKeys(mod.assignment.prompts);
+    if (mcqKeys.length > 0) {
+      keys[`java-${modId}-assignment`] = mcqKeys;
     }
   }
 }
@@ -100,9 +115,9 @@ for (const [modId, mod] of Object.entries(testing.TESTING_COURSE_DATA)) {
     keys[`testing-${modId}`] = mod.quiz.map((q) => ({ id: q.id, correctAnswer: q.correctAnswer }));
   }
   if (mod.assignment?.prompts?.length) {
-    const mcqPrompts = mod.assignment.prompts.filter(p => typeof p === 'object' && p.kind === 'mcq');
-    if (mcqPrompts.length > 0) {
-      keys[`testing-${modId}-assignment`] = mcqPrompts.map((q, idx) => ({ id: idx + 1, correctAnswer: q.correctAnswer }));
+    const mcqKeys = assignmentMcqKeys(mod.assignment.prompts);
+    if (mcqKeys.length > 0) {
+      keys[`testing-${modId}-assignment`] = mcqKeys;
     }
   }
 }
@@ -131,9 +146,9 @@ for (const [prefix, file, exportName] of RECORD_COURSES) {
       keys[`${prefix}-${modId}`] = m.quiz.map((q) => ({ id: q.id, correctAnswer: q.correctAnswer }));
     }
     if (m.assignment?.prompts?.length) {
-      const mcqPrompts = m.assignment.prompts.filter(p => typeof p === 'object' && p.kind === 'mcq');
-      if (mcqPrompts.length > 0) {
-        keys[`${prefix}-${modId}-assignment`] = mcqPrompts.map((q, idx) => ({ id: idx + 1, correctAnswer: q.correctAnswer }));
+      const mcqKeys = assignmentMcqKeys(m.assignment.prompts);
+      if (mcqKeys.length > 0) {
+        keys[`${prefix}-${modId}-assignment`] = mcqKeys;
       }
     }
   }
@@ -188,6 +203,13 @@ for (const [, file, exportName] of MARKETING) {
     // renderer submits the syllabus module id directly, so no extra prefix.
     const moduleId = quizId.replace(/-quiz$/, '');
     keys[moduleId] = questions.map((q) => ({ id: q.id, correctAnswer: q.correctAnswer }));
+  }
+  // The marketing courses assess with MCQs and written case studies, so their
+  // assignments carry answer keys too. ModuleAssignment submits them under
+  // "<moduleId>-assignment".
+  for (const [assignmentId, assignment] of Object.entries(content.assignments ?? {})) {
+    const mcqKeys = assignmentMcqKeys(assignment.questions ?? []);
+    if (mcqKeys.length > 0) keys[assignmentId] = mcqKeys;
   }
 }
 
