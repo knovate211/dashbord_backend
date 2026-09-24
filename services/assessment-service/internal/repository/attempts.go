@@ -353,12 +353,16 @@ func initialGradingStatus(kind string) string {
 // pre-empts that decision and — when coding answers are still grading — shows a
 // zero that is simply wrong.
 //
-// Unlike inviteOnly this is an allowlist of one, and that is the right way
-// round here: a purpose nobody has thought about should show results normally
-// (the existing behaviour for practice and hiring), not silently stop showing
-// them.
+// A hiring result is the company's to act on, the same way: the candidate
+// hears back from the hiring team, not from a percentage on screen the moment
+// they submit (which, with coding still grading, is often wrong anyway).
+//
+// Unlike inviteOnly this is an allowlist, and that is the right way round
+// here: a purpose nobody has thought about should show results normally (the
+// behaviour practice relies on), not silently stop showing them.
 func resultsWithheld(purpose string) bool {
-	return strings.EqualFold(strings.TrimSpace(purpose), "scholarship")
+	p := strings.ToLower(strings.TrimSpace(purpose))
+	return p == "scholarship" || p == "hiring"
 }
 
 // practiceAudienceOK allows a practice test with no course list to everyone,

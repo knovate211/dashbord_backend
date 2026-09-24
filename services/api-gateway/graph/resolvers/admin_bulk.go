@@ -158,7 +158,8 @@ func (h *AdminHandler) handleInquiryBulk(w http.ResponseWriter, r *http.Request)
 func (h *AdminHandler) handleInquiryExport(w http.ResponseWriter, r *http.Request) {
 	where, args := inquiryWhere(r.URL.Query())
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT name, email, phone, whatsapp, interest, source, status, message, notes, created_at
+		SELECT name, email, phone, whatsapp, interest, source, status, message, notes,
+		       company, job_title, company_size, hiring_volume, created_at
 		FROM inquiries `+where+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		h.Log.Error("export enquiries failed", zap.Error(err))
@@ -170,15 +171,17 @@ func (h *AdminHandler) handleInquiryExport(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="enquiries.csv"`)
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"name", "email", "phone", "whatsapp", "interest", "source", "status", "message", "notes", "received"})
+	_ = cw.Write([]string{"name", "email", "phone", "whatsapp", "interest", "source", "status", "message", "notes",
+		"company", "job_title", "company_size", "hiring_volume", "received"})
 	n := 0
 	for rows.Next() {
-		var c [9]string
+		var c [13]string
 		var at time.Time
-		if rows.Scan(&c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8], &at) != nil {
+		if rows.Scan(&c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8],
+			&c[9], &c[10], &c[11], &c[12], &at) != nil {
 			continue
 		}
-		rec := make([]string, 0, 10)
+		rec := make([]string, 0, 14)
 		for _, v := range c {
 			rec = append(rec, csvSafe(v))
 		}

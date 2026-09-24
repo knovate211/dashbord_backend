@@ -53,6 +53,14 @@ func (r *Repo) FinalizeAttempt(ctx context.Context, attemptID, reason string) (*
 	`, attemptID, status); err != nil {
 		return nil, fmt.Errorf("close attempt: %w", err)
 	}
+	// The invite tracks the candidate's progress for the recruiter; without
+	// this it stays "started" forever, even after the test is handed in.
+	if _, err := tx.Exec(ctx, `
+		UPDATE assessment_invites SET status = 'submitted'
+		WHERE  id = (SELECT invite_id FROM attempts WHERE id = $1)
+	`, attemptID); err != nil {
+		return nil, fmt.Errorf("mark invite submitted: %w", err)
+	}
 
 	if err := r.recompute(ctx, tx, attemptID); err != nil {
 		return nil, err
@@ -190,8 +198,13 @@ func (r *Repo) recompute(ctx context.Context, q querier, attemptID string) error
 // scores 8/10 and then experiments with a rewrite that scores 2/10 before the
 // clock runs out should not be punished for exploring.
 //
+// ErrSubmissionNotLinked means no attempt question references the submission.
+// For practice that is expected; for a test submission it means the verdict
+// beat RecordCodeSubmission's insert and should be retried.
+var ErrSubmissionNotLinked = errors.New("submission not linked to an attempt")
+
 // Submissions that belong to ordinary practice (not an attempt) match no row
-// here and are ignored.
+// here and return ErrSubmissionNotLinked.
 func (r *Repo) ApplyGradedSubmission(ctx context.Context, submissionID, status string, passed, total int32) error {
 	var questionID string
 	err := r.pool.QueryRow(ctx, `
@@ -201,7 +214,7 @@ func (r *Repo) ApplyGradedSubmission(ctx context.Context, submissionID, status s
 		RETURNING attempt_question_id::text
 	`, submissionID, status, passed, total).Scan(&questionID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // not an assessment submission
+		return ErrSubmissionNotLinked
 	}
 	if err != nil {
 		return fmt.Errorf("update attempt submission: %w", err)
@@ -450,6 +463,10 @@ func (r *Repo) ListMyAttempts(ctx context.Context, userID string) ([]*assessment
 	}
 	return out, nil
 }
+
+// RedactWithheld is redactWithheld for callers outside the package that hand a
+// summary to the candidate (the SubmitAttempt handler).
+func RedactWithheld(s *assessmentv1.AttemptSummary) { redactWithheld(s) }
 
 // redactWithheld strips the marks from a summary the candidate may not see.
 //

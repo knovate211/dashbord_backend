@@ -91,7 +91,8 @@ func scoreNumeric(in McqInput) float64 {
 	return -in.NegativeMarking * in.Marks
 }
 
-// ScoreCoding awards marks in proportion to hidden test cases passed. A
+// ScoreCoding awards marks in proportion to test cases passed, out of every
+// case the problem has (a test submission runs them all). A
 // submission that fails to compile passes nothing and so scores zero — coding
 // questions never carry a negative mark, since a wrong attempt already costs
 // the candidate time.

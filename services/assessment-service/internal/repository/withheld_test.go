@@ -10,8 +10,8 @@ import (
 // who sat them.
 //
 // The direction matters. Unlike inviteOnly — a fail-closed guard, where an
-// unrecognised purpose must be treated as restricted — this is an allowlist of
-// one, and that is deliberate: a purpose nobody has considered yet should keep
+// unrecognised purpose must be treated as restricted — this is an allowlist,
+// and that is deliberate: a purpose nobody has considered yet should keep
 // the ordinary behaviour of showing a candidate their result, not silently
 // start hiding it.
 func TestResultsWithheld(t *testing.T) {
@@ -22,7 +22,8 @@ func TestResultsWithheld(t *testing.T) {
 	}{
 		{"scholarship", true, "a scholarship result is a fee decision staff review and email out"},
 		{"practice", false, "practice is worthless if you cannot see how you did"},
-		{"hiring", false, "hiring results are governed by the paper's reveal_results setting"},
+		{"hiring", true, "a hiring result goes to the company, who get back to the candidate"},
+		{"  Hiring ", true, "case and padding must not be a way past the redaction either"},
 		{"", false, "an unknown purpose keeps the existing behaviour rather than hiding results"},
 		{"Scholarship", true, "case must not be a way past the redaction"},
 		{"  scholarship  ", true, "nor must padding"},
@@ -76,10 +77,11 @@ func TestRedactWithheldLeavesNoMarks(t *testing.T) {
 	}
 }
 
-// TestRedactWithheldSparesOtherPapers guards the blast radius. Practice and
-// hiring summaries pass through this same helper and must come out untouched.
+// TestRedactWithheldSparesOtherPapers guards the blast radius. Practice
+// summaries pass through this same helper and must come out untouched.
+// (Recruiter reports never call it, so hiring marks stay visible to them.)
 func TestRedactWithheldSparesOtherPapers(t *testing.T) {
-	for _, purpose := range []string{"practice", "hiring", ""} {
+	for _, purpose := range []string{"practice", ""} {
 		t.Run(purpose, func(t *testing.T) {
 			s := &assessmentv1.AttemptSummary{Purpose: purpose, Score: 87, MaxScore: 100, Percent: 87, Passed: true}
 			redactWithheld(s)

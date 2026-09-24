@@ -29,10 +29,11 @@ import (
 // AdminHandler pattern. An inquiry is a flat row with no domain logic; routing
 // it through a new gRPC service would be plumbing for its own sake.
 type InquiryHandler struct {
-	Pool    *pgxpool.Pool
-	Log     *zap.Logger
-	limiter *rateLimiter
-	mailer  *mailer
+	Pool         *pgxpool.Pool
+	Log          *zap.Logger
+	limiter      *rateLimiter
+	emailLimiter *rateLimiter
+	mailer       *mailer
 }
 
 // NewInquiryHandler wires the handler and ensures its table exists.
@@ -44,8 +45,13 @@ func NewInquiryHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger)
 		// college campus can sit behind one NAT address, so a tight per-IP cap
 		// would lock out real enquiries during a campaign. The honeypot does
 		// most of the anti-bot work; this only stops a runaway flood.
-		limiter: newRateLimiter(30, 10*time.Minute),
-		mailer:  newMailer(log),
+		// Per-IP limiting is OFF by default: a whole campus can sit behind one
+		// NAT address, and blocking it during a drive loses real enquiries.
+		// Abuse is handled by the honeypot and the per-email cap below.
+		// INQUIRY_IP_LIMIT > 0 turns an IP cap back on.
+		limiter:      newRateLimiter(envInt("INQUIRY_IP_LIMIT", 0), envMinutes("INQUIRY_IP_WINDOW_MIN", 10)),
+		emailLimiter: newRateLimiter(envInt("INQUIRY_EMAIL_LIMIT", 5), time.Hour),
+		mailer:       newMailer(log),
 	}
 	if err := h.ensureTable(ctx); err != nil {
 		return nil, err
@@ -78,6 +84,13 @@ func (h *InquiryHandler) ensureTable(ctx context.Context) error {
 		-- CREATE TABLE IF NOT EXISTS is a no-op once the table exists, so new
 		-- columns need their own ALTER to reach databases created earlier.
 		ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS whatsapp TEXT NOT NULL DEFAULT '';
+
+		-- Company leads for the hiring-test platform (the /hire page).
+		-- Empty for learner enquiries.
+		ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS company       TEXT NOT NULL DEFAULT '';
+		ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS job_title     TEXT NOT NULL DEFAULT '';
+		ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS company_size  TEXT NOT NULL DEFAULT '';
+		ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS hiring_volume TEXT NOT NULL DEFAULT '';
 	`)
 	if err != nil {
 		return fmt.Errorf("create inquiries table: %w", err)
@@ -96,6 +109,11 @@ type inquiryInput struct {
 	Message  string `json:"message"`
 	Source   string `json:"source"`
 	PageURL  string `json:"page_url"`
+	// Company fields, sent only by the hiring-platform form.
+	Company      string `json:"company"`
+	JobTitle     string `json:"job_title"`
+	CompanySize  string `json:"company_size"`
+	HiringVolume string `json:"hiring_volume"`
 	// Honeypot: a field hidden from real users. Bots fill every input they
 	// find, so anything arriving here is discarded — while still returning
 	// success, so the bot has no signal to adapt to.
@@ -136,16 +154,18 @@ func (h *InquiryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.limiter.allow(clientIP(r)) {
+	if !h.limiter.allow(clientIP(r)) || !h.emailLimiter.allow(email) {
 		h.fail(w, http.StatusTooManyRequests, "too many submissions — please try again shortly")
 		return
 	}
 
 	_, err := h.Pool.Exec(r.Context(), `
-		INSERT INTO inquiries (name, email, phone, whatsapp, interest, message, source, page_url)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO inquiries (name, email, phone, whatsapp, interest, message, source, page_url,
+		                       company, job_title, company_size, hiring_volume)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`, name, email, clip(in.Phone, 40), clip(in.WhatsApp, 40), clip(in.Interest, 120),
-		clip(in.Message, 4000), normalizeSource(in.Source), clip(in.PageURL, 300))
+		clip(in.Message, 4000), normalizeSource(in.Source), clip(in.PageURL, 300),
+		clip(in.Company, 160), clip(in.JobTitle, 120), clip(in.CompanySize, 40), clip(in.HiringVolume, 40))
 	if err != nil {
 		h.Log.Error("save inquiry failed", zap.Error(err))
 		h.fail(w, http.StatusInternalServerError, "could not submit your enquiry, please try again")
@@ -229,6 +249,11 @@ type inquiryRow struct {
 	Status    string `json:"status"`
 	Notes     string `json:"notes"`
 	CreatedAt string `json:"created_at"`
+
+	Company      string `json:"company"`
+	JobTitle     string `json:"job_title"`
+	CompanySize  string `json:"company_size"`
+	HiringVolume string `json:"hiring_volume"`
 }
 
 // ListInquiries backs GET /api/admin/inquiries.
@@ -253,7 +278,8 @@ func (h *InquiryHandler) ListInquiries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.Pool.Query(r.Context(), fmt.Sprintf(`
-		SELECT id::text, name, email, phone, whatsapp, interest, message, source, page_url, status, notes, created_at
+		SELECT id::text, name, email, phone, whatsapp, interest, message, source, page_url, status, notes, created_at,
+		       company, job_title, company_size, hiring_volume
 		FROM   inquiries %s
 		ORDER  BY created_at DESC
 		LIMIT $%d OFFSET $%d
@@ -270,7 +296,8 @@ func (h *InquiryHandler) ListInquiries(w http.ResponseWriter, r *http.Request) {
 		var i inquiryRow
 		var created time.Time
 		if err := rows.Scan(&i.ID, &i.Name, &i.Email, &i.Phone, &i.WhatsApp, &i.Interest, &i.Message,
-			&i.Source, &i.PageURL, &i.Status, &i.Notes, &created); err != nil {
+			&i.Source, &i.PageURL, &i.Status, &i.Notes, &created,
+			&i.Company, &i.JobTitle, &i.CompanySize, &i.HiringVolume); err != nil {
 			h.Log.Error("scan inquiry failed", zap.Error(err))
 			h.fail(w, http.StatusInternalServerError, "could not load enquiries")
 			return
@@ -307,8 +334,8 @@ func inquiryWhere(q url.Values) (string, []any) {
 	if s := strings.TrimSpace(q.Get("search")); s != "" {
 		args = append(args, s)
 		clauses = append(clauses, fmt.Sprintf(
-			"(name ILIKE '%%' || $%d || '%%' OR email ILIKE '%%' || $%d || '%%' OR phone ILIKE '%%' || $%d || '%%')",
-			len(args), len(args), len(args)))
+			"(name ILIKE '%%' || $%d || '%%' OR email ILIKE '%%' || $%d || '%%' OR phone ILIKE '%%' || $%d || '%%' OR company ILIKE '%%' || $%d || '%%')",
+			len(args), len(args), len(args), len(args)))
 	}
 	if d, err := time.Parse("2006-01-02", q.Get("from")); err == nil {
 		add("created_at >= $%d", d)
@@ -369,11 +396,19 @@ type rateLimiter struct {
 	window time.Duration
 }
 
+// newRateLimiter returns nil — no limit at all — when limit <= 0, so any cap
+// can be switched off from configuration.
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	if limit <= 0 {
+		return nil
+	}
 	return &rateLimiter{hits: make(map[string][]time.Time), limit: limit, window: window}
 }
 
 func (l *rateLimiter) allow(key string) bool {
+	if l == nil {
+		return true
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 

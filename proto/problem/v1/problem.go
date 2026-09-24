@@ -55,6 +55,9 @@ type Problem struct {
 	SupportedLanguages []string `json:"supported_languages,omitempty"`
 	SetId              string   `json:"set_id"`
 	UserStatus         string   `json:"user_status"` // Solved | InProgress | Unsolved
+	// IsPrivate problems belong to hiring/scholarship tests. The gateway only
+	// serves them to admins and to candidates whose attempt contains them.
+	IsPrivate bool `json:"is_private,omitempty"`
 }
 
 type Example struct {

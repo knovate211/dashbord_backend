@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -167,7 +168,7 @@ func (h *AdminHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	byRole := map[string]int{}
-	if rows, err := h.Pool.Query(ctx, `SELECT role, COUNT(*) FROM users WHERE role <> 'applicant' GROUP BY role`); err == nil {
+	if rows, err := h.Pool.Query(ctx, `SELECT role, COUNT(*) FROM users WHERE role NOT IN ('applicant', 'candidate') GROUP BY role`); err == nil {
 		for rows.Next() {
 			var role string
 			var n int
@@ -195,7 +196,7 @@ func (h *AdminHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 	if rows, err := h.Pool.Query(ctx, `
 		SELECT d::date::text, COUNT(u.id)
 		FROM generate_series((now() - interval '29 days')::date, now()::date, interval '1 day') d
-		LEFT JOIN users u ON u.created_at::date = d::date AND u.role <> 'applicant'
+		LEFT JOIN users u ON u.created_at::date = d::date AND u.role NOT IN ('applicant', 'candidate')
 		GROUP BY d ORDER BY d`); err == nil {
 		for rows.Next() {
 			var dc dayCount
@@ -211,11 +212,74 @@ func (h *AdminHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 		total += n
 	}
 
+	// Sign-ups split into students and staff over a chosen window (7, 30 or
+	// 90 days), plus the same split for the window before it so the chart can
+	// say "vs previous period". Staff is everyone who is not a student.
+	days := 30
+	switch r.URL.Query().Get("days") {
+	case "7":
+		days = 7
+	case "90":
+		days = 90
+	}
+	type roleDay struct {
+		Day      string `json:"day"`
+		Students int    `json:"students"`
+		Staff    int    `json:"staff"`
+	}
+	series := []roleDay{}
+	if rows, err := h.Pool.Query(ctx, `
+		SELECT d::date::text,
+		       COUNT(u.id) FILTER (WHERE u.role = 'student'),
+		       COUNT(u.id) FILTER (WHERE u.role <> 'student')
+		FROM generate_series((now() - make_interval(days => $1 - 1))::date, now()::date, interval '1 day') d
+		LEFT JOIN users u ON u.created_at::date = d::date AND u.role NOT IN ('applicant', 'candidate')
+		GROUP BY d ORDER BY d`, days); err == nil {
+		for rows.Next() {
+			var rd roleDay
+			if rows.Scan(&rd.Day, &rd.Students, &rd.Staff) == nil {
+				series = append(series, rd)
+			}
+		}
+		rows.Close()
+	}
+	var prevStudents, prevStaff int
+	_ = h.Pool.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE role = 'student'), COUNT(*) FILTER (WHERE role <> 'student')
+		FROM   users
+		WHERE  role NOT IN ('applicant', 'candidate')
+		  AND  created_at >= (now() - make_interval(days => $1 * 2 - 1))::date
+		  AND  created_at <  (now() - make_interval(days => $1 - 1))::date`, days).Scan(&prevStudents, &prevStaff)
+
+	// Daily counts for the last 14 days, for the sparklines on the headline
+	// cards. Only metrics that have a history get one; the rest show none
+	// rather than a made-up line.
+	spark := func(label, q string) []int {
+		out := []int{}
+		rows, err := h.Pool.Query(ctx, `
+			SELECT COUNT(x.at)
+			FROM generate_series((now() - interval '13 days')::date, now()::date, interval '1 day') d
+			LEFT JOIN (`+q+`) x ON x.at::date = d::date
+			GROUP BY d ORDER BY d`)
+		if err != nil {
+			h.Log.Debug("dashboard sparkline unavailable", zap.String("stat", label), zap.Error(err))
+			return out
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var n int
+			if rows.Scan(&n) == nil {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+
 	h.json(w, http.StatusOK, map[string]interface{}{
 		"users_total":         total,
 		"users_by_role":       byRole,
 		"users_by_course":     byCourse,
-		"users_new_7d":        count("users_new_7d", `SELECT COUNT(*) FROM users WHERE role <> 'applicant' AND created_at > now() - interval '7 days'`),
+		"users_new_7d":        count("users_new_7d", `SELECT COUNT(*) FROM users WHERE role NOT IN ('applicant', 'candidate') AND created_at > now() - interval '7 days'`),
 		"users_no_course":     count("users_no_course", `SELECT COUNT(*) FROM users u WHERE u.role = 'student' AND NOT EXISTS (SELECT 1 FROM user_courses uc WHERE uc.user_id = u.id)`),
 		"enquiries_new":       count("enquiries_new", `SELECT COUNT(*) FROM inquiries WHERE status = 'new'`),
 		"enquiries_7d":        count("enquiries_7d", `SELECT COUNT(*) FROM inquiries WHERE created_at > now() - interval '7 days'`),
@@ -227,6 +291,24 @@ func (h *AdminHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 		"answers_to_grade":    count("answers_to_grade", `SELECT COUNT(*) FROM attempt_questions aq JOIN attempts a ON a.id = aq.attempt_id WHERE aq.kind = 'descriptive' AND aq.grading_status IN ('pending', 'manual_review') AND a.status <> 'in_progress'`),
 		"classes_active":      count("classes_active", `SELECT COUNT(*) FROM class_schedules`),
 		"signups_30d":         signups,
+
+		// Last week against the week before, for the trend arrows.
+		"users_new_prev_7d":   count("users_new_prev_7d", `SELECT COUNT(*) FROM users WHERE role NOT IN ('applicant', 'candidate') AND created_at > now() - interval '14 days' AND created_at <= now() - interval '7 days'`),
+		"enquiries_prev_7d":   count("enquiries_prev_7d", `SELECT COUNT(*) FROM inquiries WHERE created_at > now() - interval '14 days' AND created_at <= now() - interval '7 days'`),
+		"scholarship_prev_7d": count("scholarship_prev_7d", `SELECT COUNT(*) FROM scholarship_applications WHERE created_at > now() - interval '14 days' AND created_at <= now() - interval '7 days'`),
+		"attempts_prev_7d":    count("attempts_prev_7d", `SELECT COUNT(*) FROM attempts WHERE started_at > now() - interval '14 days' AND started_at <= now() - interval '7 days'`),
+
+		"signups_days":    days,
+		"signups_by_role": series,
+		"signups_prev":    map[string]int{"students": prevStudents, "staff": prevStaff},
+		"spark": map[string][]int{
+			"signups":     spark("signups", `SELECT created_at AS at FROM users WHERE role NOT IN ('applicant', 'candidate')`),
+			"enquiries":   spark("enquiries", `SELECT created_at AS at FROM inquiries`),
+			"scholarship": spark("scholarship", `SELECT created_at AS at FROM scholarship_applications`),
+			"attempts":    spark("attempts", `SELECT started_at AS at FROM attempts`),
+			"enrolments":  spark("enrolments", `SELECT granted_at AS at FROM user_courses`),
+			"submissions": spark("submissions", `SELECT submitted_at AS at FROM attempts WHERE submitted_at IS NOT NULL`),
+		},
 	})
 }
 
@@ -324,7 +406,7 @@ func (h *AdminHandler) handleBulkUsers(w http.ResponseWriter, r *http.Request) {
 			h.jsonErr(w, http.StatusBadRequest, "role must be 'student', 'recruiter' or 'admin'")
 			return
 		}
-		sql = `UPDATE users SET role = $2, updated_at = now() WHERE id::text = ANY($1) AND role <> 'applicant'
+		sql = `UPDATE users SET role = $2, updated_at = now() WHERE id::text = ANY($1) AND role NOT IN ('applicant', 'candidate')
 		       RETURNING id::text, email`
 		args = []interface{}{req.IDs, req.Role}
 	case "grant_course":
@@ -347,7 +429,7 @@ func (h *AdminHandler) handleBulkUsers(w http.ResponseWriter, r *http.Request) {
 		       RETURNING u.id::text, u.email`
 		args = []interface{}{req.IDs, req.CourseID}
 	case "delete":
-		sql = `DELETE FROM users WHERE id::text = ANY($1) AND role <> 'applicant' RETURNING id::text, email`
+		sql = `DELETE FROM users WHERE id::text = ANY($1) AND role NOT IN ('applicant', 'candidate') RETURNING id::text, email`
 		args = []interface{}{req.IDs}
 	default:
 		h.jsonErr(w, http.StatusBadRequest, "unknown action")
@@ -469,7 +551,7 @@ func userFiltersFromQuery(r *http.Request) userFilters {
 // where builds the WHERE clause over alias `u`. Placeholders start at $1.
 // Scholarship applicants are always excluded — see listUsers.
 func (f userFilters) where() (string, []interface{}) {
-	conds := []string{`u.role <> 'applicant'`}
+	conds := []string{`u.role NOT IN ('applicant', 'candidate')`}
 	args := []interface{}{}
 	next := func(v interface{}) string {
 		args = append(args, v)
@@ -496,4 +578,89 @@ func (f userFilters) where() (string, []interface{}) {
 		conds = append(conds, "u.created_at < "+next(f.To)+"::date + 1")
 	}
 	return strings.Join(conds, " AND "), args
+}
+
+// activityItem is one line of the dashboard's recent-activity feed.
+type activityItem struct {
+	At     string `json:"at"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+	Text   string `json:"text"`
+	Kind   string `json:"kind"` // enrolled | test | scholarship | enquiry | joined
+	LinkTo string `json:"link_to,omitempty"`
+	// Course is a course id for enrolments and scholarship applications; the
+	// panel turns it into a name, since the catalogue lives there.
+	Course string `json:"course,omitempty"`
+}
+
+// GET /api/admin/activity?limit=8 — the latest things people did on the
+// platform, newest first. It is built from the tables that record those
+// events rather than a separate log, so it can never disagree with them.
+// Each source is queried on its own; a missing table just contributes nothing.
+func (h *AdminHandler) handleActivity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 50 {
+		limit = 8
+	}
+
+	sources := []struct{ kind, sql string }{
+		{"enrolled", `
+			SELECT uc.granted_at, COALESCE(u.name, ''), u.email, 'Enrolled in', '/users?course=' || uc.course_id, uc.course_id
+			FROM user_courses uc JOIN users u ON u.id = uc.user_id
+			ORDER BY uc.granted_at DESC LIMIT $1`},
+		{"test", `
+			SELECT a.submitted_at, COALESCE(u.name, ''), u.email, 'Completed ' || s.title,
+			       '/tests/' || s.id || '/results/' || a.id, ''
+
+			FROM attempts a JOIN users u ON u.id = a.user_id JOIN assessments s ON s.id = a.assessment_id
+			WHERE a.submitted_at IS NOT NULL
+			ORDER BY a.submitted_at DESC LIMIT $1`},
+		{"scholarship", `
+			SELECT created_at, name, email, 'Applied for a scholarship in', '/scholarship', course_id
+			FROM scholarship_applications ORDER BY created_at DESC LIMIT $1`},
+		{"enquiry", `
+			SELECT created_at, name, email,
+			       CASE WHEN company <> '' THEN 'Hiring enquiry from ' || company
+			            WHEN interest <> '' THEN 'Enquired about ' || interest
+			            ELSE 'Sent an enquiry' END,
+			       '/enquiries', ''
+			FROM inquiries ORDER BY created_at DESC LIMIT $1`},
+		{"joined", `
+			SELECT created_at, COALESCE(name, ''), email, 'Joined as ' || role, '/users', ''
+			FROM users WHERE role NOT IN ('applicant', 'candidate')
+			ORDER BY created_at DESC LIMIT $1`},
+	}
+
+	type timed struct {
+		at time.Time
+		activityItem
+	}
+	var all []timed
+	for _, src := range sources {
+		rows, err := h.Pool.Query(ctx, src.sql, limit)
+		if err != nil {
+			h.Log.Debug("activity source unavailable", zap.String("kind", src.kind), zap.Error(err))
+			continue
+		}
+		for rows.Next() {
+			var t timed
+			if rows.Scan(&t.at, &t.Name, &t.Email, &t.Text, &t.LinkTo, &t.Course) == nil {
+				t.Kind = src.kind
+				all = append(all, t)
+			}
+		}
+		rows.Close()
+	}
+
+	sort.Slice(all, func(i, j int) bool { return all[i].at.After(all[j].at) })
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	out := make([]activityItem, 0, len(all))
+	for _, t := range all {
+		t.At = t.at.UTC().Format(time.RFC3339)
+		out = append(out, t.activityItem)
+	}
+	h.json(w, http.StatusOK, map[string]any{"items": out})
 }

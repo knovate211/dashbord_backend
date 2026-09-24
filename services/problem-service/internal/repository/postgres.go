@@ -136,10 +136,10 @@ func (r *ProblemRepository) GetProblem(ctx context.Context, req *problemv1.GetPr
 
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, slug, title, difficulty, topic, xp, statement,
-		       COALESCE(set_id::text, '') AS set_id, io_mode
+		       COALESCE(set_id::text, '') AS set_id, io_mode, is_private
 		FROM   problems
 		WHERE  id::text = $1 OR slug = $1
-	`, req.Id).Scan(&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode)
+	`, req.Id).Scan(&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode, &p.IsPrivate)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("problem not found: %s", req.Id)

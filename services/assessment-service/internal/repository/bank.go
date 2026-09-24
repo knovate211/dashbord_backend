@@ -43,14 +43,16 @@ func (r *Repo) UpsertMcqQuestion(ctx context.Context, req *assessmentv1.UpsertMc
 			return "", fmt.Errorf("insert mcq question: %w", err)
 		}
 	} else {
+		// A scoped edit only matches the company's own questions, so a
+		// recruiter's edit of a platform or foreign question is "not found".
 		ct, err := tx.Exec(ctx, `
 			UPDATE mcq_questions
 			SET    topic = $2, difficulty = $3, body = $4, kind = $5,
 			       explanation = $6, is_active = $7, course_id = $8
-			WHERE  id = $1
+			WHERE  id = $1 AND ($9 = '' OR company_id::text = $9)
 		`, id, defaultStr(q.Topic, "General"), defaultStr(q.Difficulty, "Medium"),
 			q.Body, defaultStr(q.Kind, "single"), q.Explanation, q.IsActive,
-			strings.TrimSpace(q.CourseId))
+			strings.TrimSpace(q.CourseId), req.CompanyScope)
 		if err != nil {
 			return "", fmt.Errorf("update mcq question: %w", err)
 		}
@@ -222,8 +224,11 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 // DeleteMcqQuestion retires a question. It is a soft delete: a hard delete
 // would either break the foreign key from a published test or silently rewrite
 // history for attempts that already used it.
-func (r *Repo) DeleteMcqQuestion(ctx context.Context, id string) error {
-	ct, err := r.pool.Exec(ctx, `UPDATE mcq_questions SET is_active = false WHERE id = $1`, id)
+func (r *Repo) DeleteMcqQuestion(ctx context.Context, id, companyScope string) error {
+	ct, err := r.pool.Exec(ctx, `
+		UPDATE mcq_questions SET is_active = false
+		WHERE  id = $1 AND ($2 = '' OR company_id::text = $2)
+	`, id, companyScope)
 	if err != nil {
 		return fmt.Errorf("retire mcq question: %w", err)
 	}

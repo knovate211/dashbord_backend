@@ -33,6 +33,8 @@ type AdminHandler struct {
 	// Mailer sends a new account its login details; nil sends nothing (the
 	// account is still created and its password still returned to the admin).
 	Mailer *userMailer
+	// Enroll lists online course purchases; nil disables that route.
+	Enroll *EnrollHandler
 	// Exec generates starter code and verifies reference solutions for the
 	// coding-problem editor; nil disables those two actions.
 	Exec executionv1.ExecutionServiceClient
@@ -47,14 +49,19 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Role guard — admin only
-	if middleware.RoleFromContext(r.Context()) != "admin" {
+	path := strings.TrimPrefix(r.URL.Path, "/api/admin")
+	path = strings.TrimRight(path, "/")
+
+	// Role guard — admin only, except two read-only lookups the recruiter
+	// screens share with the admin ones (see serveRecruiterLookup).
+	if role := middleware.RoleFromContext(r.Context()); role != "admin" {
+		if role == "recruiter" && r.Method == http.MethodGet && (path == "/courses" || path == "/mcq-bank/facets") {
+			h.serveRecruiterLookup(w, r, path)
+			return
+		}
 		h.jsonErr(w, http.StatusForbidden, "admin access required")
 		return
 	}
-
-	path := strings.TrimPrefix(r.URL.Path, "/api/admin")
-	path = strings.TrimRight(path, "/")
 
 	switch {
 	// POST /api/admin/bulk-import
@@ -156,6 +163,10 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleStats(w, r)
 
 	// GET /api/admin/grading-queue — descriptive answers awaiting a mark
+	// GET /api/admin/activity — recent-activity feed for the dashboard
+	case path == "/activity" && r.Method == http.MethodGet:
+		h.handleActivity(w, r)
+
 	case path == "/grading-queue" && r.Method == http.MethodGet:
 		h.handleGradingQueue(w, r)
 
@@ -178,6 +189,10 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSaveProblem(w, r, strings.TrimPrefix(path, "/problems/"))
 	case strings.HasPrefix(path, "/problems/") && !strings.Contains(path[len("/problems/"):], "/") && r.Method == http.MethodDelete:
 		h.handleDeleteProblem(w, r, strings.TrimPrefix(path, "/problems/"))
+
+	// GET /api/admin/enrollments — online course purchases
+	case path == "/enrollments" && r.Method == http.MethodGet && h.Enroll != nil:
+		h.Enroll.ListOrders(w, r)
 
 	// GET /api/admin/mcq-bank/facets — question counts per course / topic / difficulty
 	case path == "/mcq-bank/facets" && r.Method == http.MethodGet:
@@ -262,6 +277,10 @@ type adminUserRow struct {
 	Role      string   `json:"role"`
 	CourseIDs []string `json:"course_ids"`
 	CreatedAt string   `json:"created_at"`
+	// Companies the user recruits for (company_members). Empty for anyone who
+	// is not a recruiter; shown on the Users screen so staff can see who works
+	// for which company without opening every company.
+	Companies json.RawMessage `json:"companies"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -599,7 +618,12 @@ func (h *AdminHandler) listUsers(ctx context.Context, page, pageSize int, f user
 	args = append(args, pageSize, offset)
 	query := fmt.Sprintf(`
 		SELECT u.id::text, u.email, u.name, u.role, u.created_at,
-		       COALESCE(array_agg(uc.course_id) FILTER (WHERE uc.course_id IS NOT NULL), '{}') AS course_ids
+		       COALESCE(array_agg(uc.course_id) FILTER (WHERE uc.course_id IS NOT NULL), '{}') AS course_ids,
+		       COALESCE((
+		         SELECT json_agg(json_build_object('id', c.id, 'name', c.name, 'role', m.role) ORDER BY c.name)
+		         FROM   company_members m JOIN companies c ON c.id = m.company_id
+		         WHERE  m.user_id = u.id
+		       ), '[]'::json) AS companies
 		FROM users u
 		LEFT JOIN user_courses uc ON uc.user_id = u.id
 		WHERE %s
@@ -618,7 +642,8 @@ func (h *AdminHandler) listUsers(ctx context.Context, page, pageSize int, f user
 		var u adminUserRow
 		var createdAt time.Time
 		var courseIDs []string
-		if err := pgRows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &createdAt, &courseIDs); err != nil {
+		var companies []byte
+		if err := pgRows.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &createdAt, &courseIDs, &companies); err != nil {
 			return nil, 0, fmt.Errorf("scan user: %w", err)
 		}
 		u.CreatedAt = createdAt.Format(time.RFC3339)
@@ -626,6 +651,7 @@ func (h *AdminHandler) listUsers(ctx context.Context, page, pageSize int, f user
 			courseIDs = []string{}
 		}
 		u.CourseIDs = courseIDs
+		u.Companies = json.RawMessage(companies)
 		users = append(users, u)
 	}
 	if users == nil {

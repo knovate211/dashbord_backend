@@ -7,19 +7,26 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/knovate211/api-gateway/middleware"
-	submissionv1 "github.com/knovate211/proto/submission/v1"
 	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
 )
 
 // SubmissionClients holds all gRPC clients needed for submission resolvers.
 type SubmissionClients struct {
 	SubmissionSvc submissionv1.SubmissionServiceClient
 	ExecutionSvc  executionv1.ExecutionServiceClient
-	Log           *zap.Logger
+	// ProblemSvc keeps private (test-only) problems out of practice run/submit.
+	ProblemSvc problemv1.ProblemServiceClient
+	Log        *zap.Logger
 }
 
 // GetSubmissionResolver handles the getSubmission GraphQL query.
 func (c *SubmissionClients) GetSubmission(p graphql.ResolveParams) (interface{}, error) {
+	userID := middleware.UserIDFromContext(p.Context)
+	if userID == "" {
+		return nil, fmt.Errorf("authentication required")
+	}
 	id, ok := p.Args["id"].(string)
 	if !ok || id == "" {
 		return nil, fmt.Errorf("id is required")
@@ -29,7 +36,14 @@ func (c *SubmissionClients) GetSubmission(p graphql.ResolveParams) (interface{},
 	if err != nil {
 		return nil, fmt.Errorf("submission not found: %s", id)
 	}
+	admin := isAdmin(p.Context)
+	if s.UserId != userID && !admin {
+		return nil, fmt.Errorf("submission not found: %s", id)
+	}
 
+	if !admin {
+		redactHidden(s)
+	}
 	return submissionToMap(s), nil
 }
 
@@ -54,6 +68,7 @@ func (c *SubmissionClients) ListSubmissions(p graphql.ResolveParams) (interface{
 
 	submissions := make([]interface{}, 0, len(resp.Submissions))
 	for _, s := range resp.Submissions {
+		redactHidden(s)
 		submissions = append(submissions, submissionToMap(s))
 	}
 
@@ -78,6 +93,9 @@ func (c *SubmissionClients) SubmitCode(p graphql.ResolveParams) (interface{}, er
 
 	if problemId == "" || language == "" || code == "" {
 		return nil, fmt.Errorf("problemId, language, and code are required")
+	}
+	if err := requirePracticeProblem(p.Context, c.ProblemSvc, problemId); err != nil {
+		return nil, err
 	}
 
 	resp, err := c.SubmissionSvc.Submit(p.Context, &submissionv1.SubmitRequest{
@@ -147,6 +165,9 @@ func (c *SubmissionClients) RunCode(p graphql.ResolveParams) (interface{}, error
 	if problemId == "" || language == "" || code == "" {
 		return nil, fmt.Errorf("problemId, language, and code are required")
 	}
+	if err := requirePracticeProblem(p.Context, c.ProblemSvc, problemId); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.ExecutionSvc.RunCode(p.Context, &executionv1.RunCodeRequest{
 		ProblemId: problemId,
@@ -175,6 +196,17 @@ func (c *SubmissionClients) RunCode(p graphql.ResolveParams) (interface{}, error
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// redactHidden blanks the content of hidden test cases. The learner still sees
+// each hidden case's verdict and time, but never its input, expected output,
+// or anything their program printed from it — that would leak the case.
+func redactHidden(s *submissionv1.Submission) {
+	for _, tr := range s.TestResults {
+		if tr.IsHidden {
+			tr.Input, tr.ExpectedOutput, tr.ActualOutput, tr.Error = "", "", "", ""
+		}
+	}
+}
+
 func submissionToMap(s *submissionv1.Submission) map[string]interface{} {
 	testResults := make([]interface{}, 0, len(s.TestResults))
 	for _, tr := range s.TestResults {
@@ -186,6 +218,7 @@ func submissionToMap(s *submissionv1.Submission) map[string]interface{} {
 			"status":         tr.Status,
 			"executionMs":    tr.ExecutionMs,
 			"error":          tr.Error,
+			"isHidden":       tr.IsHidden,
 		})
 	}
 	return map[string]interface{}{

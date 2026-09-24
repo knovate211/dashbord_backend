@@ -131,25 +131,57 @@ func duplicateTestTx(ctx context.Context, tx pgx.Tx, srcID, title, actorID strin
 	return newID, sections, questions, nil
 }
 
+// serveRecruiterLookup answers the two admin GETs a recruiter may also make:
+// the course catalogue (public anyway) and bank facets, which for a recruiter
+// count their company's questions plus the shared platform bank — the same
+// set /api/recruiter/mcq-bank lists for them.
+func (h *AdminHandler) serveRecruiterLookup(w http.ResponseWriter, r *http.Request, path string) {
+	if path == "/courses" {
+		h.handleListCourses(w, r)
+		return
+	}
+	ctx := r.Context()
+	userID := middleware.UserIDFromContext(ctx)
+	var companyID string
+	err := h.Pool.QueryRow(ctx, `
+		SELECT company_id::text FROM company_members
+		WHERE  user_id::text = $1 AND ($2 = '' OR company_id::text = $2)
+		ORDER  BY company_id LIMIT 1
+	`, userID, r.URL.Query().Get("companyId")).Scan(&companyID)
+	if err != nil {
+		h.jsonErr(w, http.StatusForbidden, "not a member of this company")
+		return
+	}
+	h.mcqFacets(w, r, companyID)
+}
+
 // GET /api/admin/mcq-bank/facets — live question counts per course, topic and
 // difficulty, for the course rail and filters on the question bank screen.
 // Only active questions count; deleted ones are soft-deleted and hidden.
 func (h *AdminHandler) handleMcqFacets(w http.ResponseWriter, r *http.Request) {
+	h.mcqFacets(w, r, "")
+}
+
+// mcqFacets counts active questions, optionally limited to one company's bank
+// plus the platform bank. companyID "" means the platform bank alone.
+func (h *AdminHandler) mcqFacets(w http.ResponseWriter, r *http.Request, companyID string) {
 	ctx := r.Context()
 	course := r.URL.Query().Get("course")
+	// $1 is always the company scope, so the course filter below can share it.
+	scope := "($1 = '' AND company_id IS NULL OR $1 <> '' AND (company_id IS NULL OR company_id::text = $1))"
 	// Topic and difficulty counts follow the selected course, so the dropdowns
 	// only offer values that exist inside it.
-	cond, args := "is_active AND company_id IS NULL", []any{}
+	cond, args := "is_active AND "+scope, []any{companyID}
 	switch course {
 	case "":
 	case "__general":
 		cond += " AND course_id = ''"
 	default:
-		cond += " AND course_id = $1"
+		cond += " AND course_id = $2"
 		args = append(args, course)
 	}
 	h.json(w, http.StatusOK, map[string]any{
-		"course":     h.facetQuery(ctx, `SELECT course_id, '', COUNT(*)::int FROM mcq_questions WHERE is_active AND company_id IS NULL GROUP BY course_id ORDER BY 1`),
+		"course":     h.facetQuery(ctx, `SELECT course_id, '', COUNT(*)::int FROM mcq_questions WHERE is_active AND `+scope+` GROUP BY course_id ORDER BY 1`, companyID),
 		"topic":      h.facetQuery(ctx, `SELECT topic, '', COUNT(*)::int FROM mcq_questions WHERE `+cond+` GROUP BY topic ORDER BY 3 DESC`, args...),
 		"difficulty": h.facetQuery(ctx, `SELECT difficulty, '', COUNT(*)::int FROM mcq_questions WHERE `+cond+` GROUP BY difficulty ORDER BY 1`, args...),
 	})

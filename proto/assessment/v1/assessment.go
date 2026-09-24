@@ -95,6 +95,10 @@ type McqQuestion struct {
 type UpsertMcqQuestionRequest struct {
 	ActorId  string       `json:"actor_id"`
 	Question *McqQuestion `json:"question"`
+	// CompanyScope, when set, limits an edit to questions owned by that
+	// company — a recruiter can never edit the platform bank or another
+	// company's questions. Empty (admins) edits any question.
+	CompanyScope string `json:"company_scope,omitempty"`
 }
 
 type UpsertMcqQuestionResponse struct {
@@ -128,6 +132,9 @@ type ListMcqQuestionsResponse struct {
 
 type DeleteMcqQuestionRequest struct {
 	Id string `json:"id"`
+	// CompanyScope limits the delete to that company's questions; see
+	// UpsertMcqQuestionRequest.
+	CompanyScope string `json:"company_scope,omitempty"`
 }
 
 type BulkImportMcqRequest struct {

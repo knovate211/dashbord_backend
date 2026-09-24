@@ -93,13 +93,15 @@ func main() {
 	// ── Build GraphQL schema ──────────────────────────────────────────────────
 	clients := &generated.Clients{
 		Problems: &resolvers.ProblemClients{
-			ProblemSvc: problemv1.NewProblemServiceClient(probConn),
-			UserSvc:    userSvcClient,
-			Log:        log,
+			ProblemSvc:    problemv1.NewProblemServiceClient(probConn),
+			UserSvc:       userSvcClient,
+			AssessmentSvc: assessmentSvcClient,
+			Log:           log,
 		},
 		Submissions: &resolvers.SubmissionClients{
 			SubmissionSvc: submissionv1.NewSubmissionServiceClient(subConn),
 			ExecutionSvc:  executionv1.NewExecutionServiceClient(execConn),
+			ProblemSvc:    problemv1.NewProblemServiceClient(probConn),
 			Log:           log,
 		},
 		Progress: &resolvers.ProgressClients{
@@ -191,6 +193,19 @@ func main() {
 				zap.String("app_base_url", cfg.appBaseURL))
 		}
 
+		// Hiring candidates: the hiring team adds candidates to a company test and
+		// each one is emailed a personal link that signs them into it. Only
+		// /api/hiring/claim is public (see publicPaths below); the rest checks
+		// company membership itself.
+		hiringHandler, err := resolvers.NewHiringHandler(
+			context.Background(), adminPool, log, cfg.jwtSecret, cfg.appBaseURL)
+		if err != nil {
+			log.Error("hiring handler init failed — candidate invitations disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/hiring/", hiringHandler)
+			log.Info("hiring candidates registered at /api/hiring/")
+		}
+
 		// Live classes and attendance. Every route needs a signed-in user; the
 		// handler checks course enrolment itself, and the schedule screens sit
 		// under /api/admin/ behind the role guard.
@@ -201,6 +216,18 @@ func main() {
 			mux.Handle("/api/attendance/", attendanceHandler)
 			adminHandler.Attendance = attendanceHandler
 			log.Info("attendance registered at /api/attendance/")
+		}
+
+		// Online course purchase through Razorpay. config/order/verify/webhook
+		// are public (listed in publicPaths below) — the buyer may not have an
+		// account yet; paying is what creates it. The order list lives under
+		// /api/admin/ behind the role guard.
+		enrollHandler, err := resolvers.NewEnrollHandler(context.Background(), adminPool, log, adminHandler.Mailer)
+		if err != nil {
+			log.Error("enrolment handler init failed — online enrolment disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/enroll/", enrollHandler)
+			adminHandler.Enroll = enrollHandler
 		}
 
 		// Self-service password reset. Public for the same reason as the
@@ -252,7 +279,9 @@ func main() {
 	authMW := middleware.Auth(jwtValidator, log,
 		"/api/health", "/api/login", "/api/inquiries",
 		"/api/password-reset/request", "/api/password-reset/confirm",
-		"/api/scholarship/config", "/api/scholarship/apply", "/api/scholarship/claim")
+		"/api/scholarship/config", "/api/scholarship/apply", "/api/scholarship/claim",
+		"/api/hiring/claim",
+		"/api/enroll/config", "/api/enroll/order", "/api/enroll/verify", "/api/enroll/webhook")
 	corsMW := middleware.CORS(cfg.allowedOrigins)
 
 	handler := corsMW(authMW(mux))

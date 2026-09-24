@@ -47,10 +47,11 @@ import (
 //     because six digits is only a million possibilities.
 //   - Both endpoints are rate limited per IP.
 type PasswordResetHandler struct {
-	Pool    *pgxpool.Pool
-	Log     *zap.Logger
-	limiter *rateLimiter
-	mailer  *resetMailer
+	Pool         *pgxpool.Pool
+	Log          *zap.Logger
+	emailLimiter *rateLimiter
+	limiter      *rateLimiter
+	mailer       *resetMailer
 	// allowDirect permits resetting without a code. See the type comment.
 	allowDirect bool
 }
@@ -76,11 +77,15 @@ func NewPasswordResetHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.L
 	h := &PasswordResetHandler{
 		Pool: pool,
 		Log:  log,
-		// Tighter than the enquiry form: a reset is a rare, deliberate action,
-		// but still loose enough for a shared campus NAT address.
-		limiter:     newRateLimiter(10, 10*time.Minute),
-		mailer:      mailer,
-		allowDirect: allowDirect,
+		// Per-IP limiting is OFF by default so a campus behind one NAT address
+		// is never locked out. Codes stay safe without it: each expires and
+		// allows resetMaxAttempts guesses. Requests are capped per email so a
+		// mailbox cannot be flooded. Direct mode has no code to protect, so it
+		// keeps an IP cap unless PASSWORD_RESET_IP_LIMIT is set explicitly.
+		limiter:      newRateLimiter(envInt("PASSWORD_RESET_IP_LIMIT", directDefault(allowDirect)), 10*time.Minute),
+		emailLimiter: newRateLimiter(envInt("PASSWORD_RESET_EMAIL_LIMIT", 5), time.Hour),
+		mailer:       mailer,
+		allowDirect:  allowDirect,
 	}
 
 	switch {
@@ -165,6 +170,10 @@ func (h *PasswordResetHandler) handleRequest(w http.ResponseWriter, r *http.Requ
 	email := strings.ToLower(strings.TrimSpace(clip(in.Email, 200)))
 	if !looksLikeEmail(email) {
 		h.fail(w, http.StatusBadRequest, "please enter a valid email address")
+		return
+	}
+	if !h.emailLimiter.allow(email) {
+		h.fail(w, http.StatusTooManyRequests, "too many reset requests for this email — please try again later")
 		return
 	}
 
@@ -397,4 +406,13 @@ func (h *PasswordResetHandler) okWith(w http.ResponseWriter, body map[string]any
 func (h *PasswordResetHandler) fail(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// directDefault is the per-IP cap used when PASSWORD_RESET_IP_LIMIT is unset:
+// none in code mode, 10 per 10 minutes in the unverified direct mode.
+func directDefault(allowDirect bool) int {
+	if allowDirect {
+		return 10
+	}
+	return 0
 }

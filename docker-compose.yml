@@ -22,7 +22,10 @@ services:
     restart: unless-stopped
     command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save ""
     ports:
-      - "6379:6379"
+      # Host port 6380, not 6379: another local project (b4igo-redis) holds
+      # 6379, and the clash left this whole stack half-started. Containers
+      # still reach Redis at redis:6379; only host tools use 6380.
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -267,13 +270,28 @@ services:
       # Staff alerts for new scholarship applications. Falls back to
       # INQUIRY_NOTIFY_TO when unset.
       SCHOLARSHIP_NOTIFY_TO: ${SCHOLARSHIP_NOTIFY_TO:-admissions@knovate.local}
-      # Rate limits on the public apply/claim endpoints. The per-IP cap is a
-      # flood stop sized for a cohort applying together from one campus NAT
-      # address; the per-email cap is the actual abuse control. Raise the IP
-      # limit for a large drive rather than removing it.
-      SCHOLARSHIP_IP_LIMIT: ${SCHOLARSHIP_IP_LIMIT:-200}
-      SCHOLARSHIP_IP_WINDOW_MIN: ${SCHOLARSHIP_IP_WINDOW_MIN:-10}
+      # Online course purchase (Razorpay). Leave the keys empty to keep online
+      # payment off — the site then offers "request a callback" instead. Use
+      # rzp_test_ keys until the flow is checked end to end. The webhook
+      # secret is the one set on the Razorpay dashboard webhook for
+      # <api>/api/enroll/webhook (events: payment.captured, order.paid).
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      # Rate limits on the public forms. Per-IP limits are OFF (0) by default:
+      # a whole campus shares one NAT address, and an IP cap blocks real
+      # students on drive day. Abuse is stopped per email instead (and by the
+      # honeypot on the forms). Set an *_IP_LIMIT above 0 only if a flood from
+      # a single address ever needs stopping.
+      SCHOLARSHIP_IP_LIMIT: ${SCHOLARSHIP_IP_LIMIT:-0}
       SCHOLARSHIP_EMAIL_LIMIT: ${SCHOLARSHIP_EMAIL_LIMIT:-5}
+      INQUIRY_IP_LIMIT: ${INQUIRY_IP_LIMIT:-0}
+      INQUIRY_EMAIL_LIMIT: ${INQUIRY_EMAIL_LIMIT:-5}
+      ENROLL_IP_LIMIT: ${ENROLL_IP_LIMIT:-0}
+      ENROLL_EMAIL_LIMIT: ${ENROLL_EMAIL_LIMIT:-10}
+      PASSWORD_RESET_IP_LIMIT: ${PASSWORD_RESET_IP_LIMIT:-}
+      PASSWORD_RESET_EMAIL_LIMIT: ${PASSWORD_RESET_EMAIL_LIMIT:-5}
+      SCHOLARSHIP_IP_WINDOW_MIN: ${SCHOLARSHIP_IP_WINDOW_MIN:-10}
       # How often to retire scholarship links that lapsed unused, in minutes.
       SCHOLARSHIP_SWEEP_MIN: ${SCHOLARSHIP_SWEEP_MIN:-15}
     ports:

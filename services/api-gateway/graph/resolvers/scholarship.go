@@ -103,7 +103,7 @@ func NewScholarshipHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.Log
 		// So the per-IP cap is sized for a cohort and left tunable, because the
 		// right number depends on the campaign. It is a flood stop, not the
 		// abuse control.
-		ipLimiter: newRateLimiter(envInt("SCHOLARSHIP_IP_LIMIT", 200), envMinutes("SCHOLARSHIP_IP_WINDOW_MIN", 10)),
+		ipLimiter: newRateLimiter(envInt("SCHOLARSHIP_IP_LIMIT", 0), envMinutes("SCHOLARSHIP_IP_WINDOW_MIN", 10)),
 		// This is the abuse control, and it stays tight. Nobody legitimately
 		// applies to the same programme five times in an hour, and a per-address
 		// limit is what stops one person farming accounts or probing which
@@ -481,7 +481,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	// The account. An applicant who already has one keeps their password, their
-	// role and their history — ON CONFLICT touches the display name only.
+	// role, their name and their history.
 	// Overwriting the password here (as the admin bulk import deliberately
 	// does) would turn a public form into an account-takeover endpoint: anyone
 	// could "apply" as admin@… and be handed a fresh credential.
@@ -511,7 +511,11 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO users (email, name, password, role)
 		VALUES ($1, $2, $3, 'applicant')
-		ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+		-- The form is public and accepts any address, so it may only rename an
+		-- account it created itself; a real student's name is theirs to keep.
+		ON CONFLICT (email) DO UPDATE
+			SET name = CASE WHEN users.role = 'applicant' THEN EXCLUDED.name ELSE users.name END,
+			    updated_at = now()
 		RETURNING id::text, (xmax = 0)
 	`, email, name, placeholder).Scan(&userID, &isNewAccount); err != nil {
 		h.Log.Error("upsert scholarship applicant failed", zap.Error(err))
@@ -722,6 +726,19 @@ func (h *ScholarshipHandler) handleClaim(w http.ResponseWriter, r *http.Request)
 	}
 	if terminalStatuses[status] {
 		h.fail(w, http.StatusConflict, "you have already completed this test")
+		return
+	}
+	// A claim link is handed to whoever filled in the public form, and that
+	// form accepts any email address. So it may only ever open an account the
+	// funnel itself created. Minting a session for an existing student, admin
+	// or recruiter here let anyone "apply" as that person and be signed in as
+	// them. Those people already have a password; their invite still stands,
+	// so they sign in normally and find the test in their list.
+	if role != "applicant" {
+		h.Log.Warn("scholarship claim refused for existing account",
+			zap.String("email", email), zap.String("role", role))
+		h.fail(w, http.StatusConflict,
+			"you already have a Knovate account — sign in with your password to take this test (use \"Forgot password\" if you need to set one)")
 		return
 	}
 

@@ -50,6 +50,7 @@ func (j *Judge) EvaluateTestCaseWithSpec(tc *problemv1.TestCase, res *sandbox.Ru
 		ExpectedOutput: tc.ExpectedOutput,
 		ActualOutput:   strings.TrimSpace(res.Stdout),
 		ExecutionMs:    res.ExecutionMs,
+		IsHidden:       tc.IsHidden,
 	}
 
 	switch {

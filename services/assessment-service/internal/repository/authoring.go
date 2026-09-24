@@ -541,12 +541,40 @@ func (r *Repo) DeleteSection(ctx context.Context, id string) error {
 // the builder saves a drag-reordered list in one round trip.
 func (r *Repo) SetSectionQuestions(ctx context.Context, req *assessmentv1.SetSectionQuestionsRequest) error {
 	var kind string
-	err := r.pool.QueryRow(ctx, `SELECT kind FROM assessment_sections WHERE id = $1`, req.SectionId).Scan(&kind)
+	var companyID *string
+	err := r.pool.QueryRow(ctx, `
+		SELECT s.kind, a.company_id::text
+		FROM   assessment_sections s JOIN assessments a ON a.id = s.assessment_id
+		WHERE  s.id = $1
+	`, req.SectionId).Scan(&kind, &companyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("lookup section kind: %w", err)
+	}
+
+	// A company's test may use its own questions and the platform bank, never
+	// another company's — the same rule drawFromBank applies to random draws.
+	if companyID != nil {
+		var ids []string
+		for _, q := range req.Questions {
+			if q.McqQuestionId != "" {
+				ids = append(ids, q.McqQuestionId)
+			}
+		}
+		if len(ids) > 0 {
+			var foreign int
+			if err := r.pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM mcq_questions
+				WHERE  id::text = ANY($1) AND company_id IS NOT NULL AND company_id::text <> $2
+			`, ids, *companyID).Scan(&foreign); err != nil {
+				return fmt.Errorf("check question ownership: %w", err)
+			}
+			if foreign > 0 {
+				return fmt.Errorf("%d question(s) belong to another company's bank", foreign)
+			}
+		}
 	}
 
 	// A coding section must hold problem references and an MCQ/descriptive

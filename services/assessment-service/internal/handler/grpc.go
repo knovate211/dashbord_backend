@@ -99,7 +99,7 @@ func (h *Handler) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMc
 }
 
 func (h *Handler) DeleteMcqQuestion(ctx context.Context, req *assessmentv1.DeleteMcqQuestionRequest) (*assessmentv1.Empty, error) {
-	return empty, wrap(h.repo.DeleteMcqQuestion(ctx, req.Id))
+	return empty, wrap(h.repo.DeleteMcqQuestion(ctx, req.Id, req.CompanyScope))
 }
 
 func (h *Handler) BulkImportMcq(ctx context.Context, req *assessmentv1.BulkImportMcqRequest) (*assessmentv1.BulkImportMcqResponse, error) {
@@ -257,6 +257,7 @@ func (h *Handler) SubmitAttemptCode(ctx context.Context, req *assessmentv1.Submi
 		Language:  req.Language,
 		Code:      req.Code,
 		UserId:    req.UserId,
+		Source:    "assessment",
 	})
 	if err != nil {
 		h.log.Error("submit attempt code failed", zap.Error(err))
@@ -282,8 +283,12 @@ func (h *Handler) SubmitAttempt(ctx context.Context, req *assessmentv1.SubmitAtt
 	if err != nil {
 		return nil, wrap(err)
 	}
+	// The summary goes straight back to the candidate, so a withheld paper
+	// (scholarship, hiring) must lose its marks here too — GetAttemptResult
+	// already redacts, and this response was the way round it.
 	if state.Status != "in_progress" {
 		summary, err := h.repo.AttemptSummary(ctx, req.AttemptId)
+		repository.RedactWithheld(summary)
 		return summary, wrap(err)
 	}
 
@@ -292,6 +297,7 @@ func (h *Handler) SubmitAttempt(ctx context.Context, req *assessmentv1.SubmitAtt
 		reason = "user"
 	}
 	summary, err := h.repo.FinalizeAttempt(ctx, req.AttemptId, reason)
+	repository.RedactWithheld(summary)
 	return summary, wrap(err)
 }
 

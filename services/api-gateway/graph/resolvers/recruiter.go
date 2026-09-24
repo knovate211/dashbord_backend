@@ -62,14 +62,16 @@ func (h *RecruiterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.adminOnly(w, r, role, func(w http.ResponseWriter, r *http.Request) { h.addCompanyMember(w, r, seg[1]) })
 
 	// ── MCQ bank ──────────────────────────────────────────────────────────────
+	// A recruiter works inside one company's bank: reads see that company's
+	// questions plus the shared platform bank, writes touch only its own.
 	case path == "/mcq-bank" && r.Method == http.MethodGet:
-		h.listMcq(w, r)
+		h.listMcq(w, r, role, userID)
 	case path == "/mcq-bank" && r.Method == http.MethodPost:
-		h.upsertMcq(w, r, userID)
+		h.upsertMcq(w, r, role, userID)
 	case path == "/mcq-bank/import" && r.Method == http.MethodPost:
-		h.importMcq(w, r, userID)
+		h.importMcq(w, r, role, userID)
 	case len(seg) == 2 && seg[0] == "mcq-bank" && r.Method == http.MethodDelete:
-		h.deleteMcq(w, r, seg[1])
+		h.deleteMcq(w, r, role, userID, seg[1])
 
 	// ── Assessments ───────────────────────────────────────────────────────────
 	case path == "/assessments" && r.Method == http.MethodGet:
@@ -213,10 +215,49 @@ func (h *RecruiterHandler) addCompanyMember(w http.ResponseWriter, r *http.Reque
 
 // ─── MCQ bank ─────────────────────────────────────────────────────────────────
 
-func (h *RecruiterHandler) listMcq(w http.ResponseWriter, r *http.Request) {
+// recruiterCompany resolves which company a recruiter is acting for. An
+// explicit id must be one of their memberships; without one, a recruiter in
+// exactly one company acts for it. Admins get the requested id unchanged
+// (empty = unscoped). ok=false means an error response was already written.
+func (h *RecruiterHandler) recruiterCompany(w http.ResponseWriter, r *http.Request, role, userID, requested string) (string, bool) {
+	if role == "admin" {
+		return requested, true
+	}
+	if requested != "" {
+		auth, err := h.AssessmentSvc.Authorize(r.Context(), &assessmentv1.AuthorizeRequest{
+			UserId: userID, Role: role, CompanyId: requested,
+		})
+		if err != nil || !auth.Allowed {
+			h.fail(w, http.StatusForbidden, "not a member of this company")
+			return "", false
+		}
+		return requested, true
+	}
+	companies, err := h.AssessmentSvc.ListCompanies(r.Context(), &assessmentv1.ListCompaniesRequest{UserId: userID})
+	if err != nil {
+		h.grpcFail(w, err, "could not list companies")
+		return "", false
+	}
+	switch len(companies.Companies) {
+	case 0:
+		h.fail(w, http.StatusForbidden, "your account is not linked to a company yet")
+		return "", false
+	case 1:
+		return companies.Companies[0].Id, true
+	default:
+		h.fail(w, http.StatusBadRequest, "choose which company to work in")
+		return "", false
+	}
+}
+
+func (h *RecruiterHandler) listMcq(w http.ResponseWriter, r *http.Request, role, userID string) {
 	q := r.URL.Query()
+	companyID, ok := h.recruiterCompany(w, r, role, userID, q.Get("companyId"))
+	if !ok {
+		return
+	}
 	resp, err := h.AssessmentSvc.ListMcqQuestions(r.Context(), &assessmentv1.ListMcqQuestionsRequest{
-		CompanyId:      q.Get("companyId"),
+		CompanyId:      companyID,
 		CourseId:       q.Get("course"),
 		IncludeRetired: q.Get("includeRetired") == "true",
 		Topic:          q.Get("topic"),
@@ -228,29 +269,58 @@ func (h *RecruiterHandler) listMcq(w http.ResponseWriter, r *http.Request) {
 	h.respond(w, resp, err, "could not load the question bank")
 }
 
-func (h *RecruiterHandler) upsertMcq(w http.ResponseWriter, r *http.Request, userID string) {
+func (h *RecruiterHandler) upsertMcq(w http.ResponseWriter, r *http.Request, role, userID string) {
 	var q assessmentv1.McqQuestion
 	if !h.decode(w, r, &q) {
 		return
 	}
-	resp, err := h.AssessmentSvc.UpsertMcqQuestion(r.Context(), &assessmentv1.UpsertMcqQuestionRequest{
-		ActorId: userID, Question: &q,
-	})
+	req := &assessmentv1.UpsertMcqQuestionRequest{ActorId: userID, Question: &q}
+	if role != "admin" {
+		companyID, ok := h.recruiterCompany(w, r, role, userID, q.CompanyId)
+		if !ok {
+			return
+		}
+		// New questions land in the recruiter's company; edits only match it.
+		q.CompanyId, req.CompanyScope = companyID, companyID
+	}
+	resp, err := h.AssessmentSvc.UpsertMcqQuestion(r.Context(), req)
 	h.respond(w, resp, err, "could not save the question")
 }
 
-func (h *RecruiterHandler) importMcq(w http.ResponseWriter, r *http.Request, userID string) {
+func (h *RecruiterHandler) importMcq(w http.ResponseWriter, r *http.Request, role, userID string) {
 	var req assessmentv1.BulkImportMcqRequest
 	if !h.decode(w, r, &req) {
 		return
 	}
 	req.ActorId = userID
+	if role != "admin" {
+		companyID, ok := h.recruiterCompany(w, r, role, userID, req.CompanyId)
+		if !ok {
+			return
+		}
+		// Rows may carry their own company id; for a recruiter every row
+		// goes into their company regardless.
+		req.CompanyId = companyID
+		for _, q := range req.Questions {
+			if q != nil {
+				q.CompanyId = companyID
+			}
+		}
+	}
 	resp, err := h.AssessmentSvc.BulkImportMcq(r.Context(), &req)
 	h.respond(w, resp, err, "could not import questions")
 }
 
-func (h *RecruiterHandler) deleteMcq(w http.ResponseWriter, r *http.Request, id string) {
-	resp, err := h.AssessmentSvc.DeleteMcqQuestion(r.Context(), &assessmentv1.DeleteMcqQuestionRequest{Id: id})
+func (h *RecruiterHandler) deleteMcq(w http.ResponseWriter, r *http.Request, role, userID, id string) {
+	req := &assessmentv1.DeleteMcqQuestionRequest{Id: id}
+	if role != "admin" {
+		companyID, ok := h.recruiterCompany(w, r, role, userID, r.URL.Query().Get("companyId"))
+		if !ok {
+			return
+		}
+		req.CompanyScope = companyID
+	}
+	resp, err := h.AssessmentSvc.DeleteMcqQuestion(r.Context(), req)
 	h.respond(w, resp, err, "could not delete the question")
 }
 
@@ -332,6 +402,12 @@ func (h *RecruiterHandler) createAssessment(w http.ResponseWriter, r *http.Reque
 	} else if role != "admin" {
 		h.fail(w, http.StatusForbidden, "a recruiter must create tests under a company")
 		return
+	}
+	// A recruiter's test is always an invite-only hiring test. A "practice"
+	// test would be listed to every student on the platform.
+	if role != "admin" {
+		a.Purpose = "hiring"
+		a.CourseIds = nil
 	}
 
 	resp, err := h.AssessmentSvc.CreateAssessment(r.Context(), &assessmentv1.CreateAssessmentRequest{

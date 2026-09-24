@@ -126,6 +126,7 @@ func (w *Worker) execute(ctx context.Context, req *executionv1.SubmitCodeRequest
 		SubmissionId: req.SubmissionId,
 		UserId:       req.UserId,
 		ProblemId:    req.ProblemId,
+		Source:       req.Source,
 	}
 
 	// Fetch all test cases (including hidden — this is a Submit operation)
@@ -138,6 +139,16 @@ func (w *Worker) execute(ctx context.Context, req *executionv1.SubmitCodeRequest
 		result.CompileError = fmt.Sprintf("failed to fetch test cases: %v", err)
 		return result
 	}
+	result.TotalCases = len(tcResp.TestCases)
+	// With nothing to check against, every submission would be Accepted.
+	if len(tcResp.TestCases) == 0 {
+		result.OverallStatus = judge.StatusRuntimeError
+		result.CompileError = "this problem has no test cases yet"
+		return result
+	}
+	// A timed test awards marks per case passed, so it must run them all.
+	// Practice only needs the first failure.
+	runAll := req.Source == "assessment"
 
 	var testResults []*executionv1.TestResult
 	var maxRuntime int64
@@ -159,6 +170,7 @@ func (w *Worker) execute(ctx context.Context, req *executionv1.SubmitCodeRequest
 				TestCaseId: tc.Id,
 				Status:     "RuntimeError",
 				Error:      err.Error(),
+				IsHidden:   tc.IsHidden,
 			}
 			testResults = append(testResults, tr)
 			continue
@@ -175,7 +187,7 @@ func (w *Worker) execute(ctx context.Context, req *executionv1.SubmitCodeRequest
 		}
 
 		// Short-circuit on first non-accepted result for efficiency
-		if tr.Status != judge.StatusAccepted {
+		if !runAll && tr.Status != judge.StatusAccepted {
 			break
 		}
 	}

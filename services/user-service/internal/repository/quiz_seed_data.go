@@ -24,42 +24,151 @@ type quizKey struct {
 	correctAns string
 }
 
-// quizAnswerKeys holds 1089 answer keys across 167 modules.
+// quizAnswerKeys holds 1172 answer keys across 180 modules.
 var quizAnswerKeys = []quizKey{
-	// dm-m1 (5 questions)
+	// dm-m1 (6 questions)
 	{"dm-m1", 1, "It is a conversion problem, so more traffic will not help"},
-	{"dm-m1", 2, "Customer interviews, support tickets and reviews"},
-	{"dm-m1", 3, "Whether the split changes what you would actually do"},
-	{"dm-m1", 4, "Search captures existing demand; social creates it"},
-	{"dm-m1", 5, "Rented reach can be withdrawn by a platform without notice"},
+	{"dm-m1", 2, "Customer interviews, support messages, reviews and search queries"},
+	{"dm-m1", 3, "Whether the split changes what you would actually say or do"},
+	{"dm-m1", 4, "Search captures demand that already exists; social has to create it"},
+	{"dm-m1", 5, "Reach borrowed from a platform can be reduced or withdrawn without notice"},
+	{"dm-m1", 6, "The second, on cost per order: about GBP 12.86 against GBP 25"},
 
-	// dm-m2 (5 questions)
+	// dm-m2 (6 questions)
 	{"dm-m2", 1, "Inconsistency rather than content quality"},
 	{"dm-m2", 2, "The blank-page problem — you never decide what to post from nothing"},
 	{"dm-m2", 3, "Keeping people on the platform"},
 	{"dm-m2", 4, "It is demoted by platforms and erodes audience trust"},
 	{"dm-m2", 5, "It escalates — the deletion becomes the story"},
+	{"dm-m2", 6, "Saves and comments show stronger interest than likes, so this is your best-performing post"},
 
-	// dm-m3 (5 questions)
+	// dm-m3 (6 questions)
 	{"dm-m3", 1, "So the ad copy and landing page can closely match the query"},
 	{"dm-m3", 2, "In queries that should have been excluded by negative keywords"},
 	{"dm-m3", 3, "The creative"},
 	{"dm-m3", 4, "Gross margin"},
 	{"dm-m3", 5, "Automated strategies need conversion volume to learn from"},
+	{"dm-m3", 6, "Plan with your own shop data — platform conversions are modelled estimates"},
 
-	// dm-m4 (5 questions)
-	{"dm-m4", 1, "No algorithm decides whether your message is delivered to your list"},
+	// dm-m4 (6 questions)
+	{"dm-m4", 1, "No algorithm decides whether your message reaches the people on your list"},
 	{"dm-m4", 2, "Solving one specific problem with immediate value"},
-	{"dm-m4", 3, "Spam complaints that degrade deliverability for your genuine subscribers too"},
+	{"dm-m4", 3, "Spam complaints and bounces that damage delivery for your genuine subscribers too"},
 	{"dm-m4", 4, "Abandoned cart"},
-	{"dm-m4", 5, "It teaches customers to abandon carts deliberately to get one"},
+	{"dm-m4", 5, "Most of the recoverable orders come back from the reminder alone, so an early code gives away margin and teaches people to abandon baskets"},
+	{"dm-m4", 6, "Opens are inflated by privacy features such as Apple Mail Privacy Protection, so judge this campaign on its clicks and orders"},
 
-	// dm-m5 (5 questions)
+	// dm-m5 (6 questions)
 	{"dm-m5", 1, "Wrong traffic — a targeting or message-match problem"},
-	{"dm-m5", 2, "Stopping the test as soon as it looks significant"},
-	{"dm-m5", 3, "Use qualitative evidence and judge changes on trend"},
-	{"dm-m5", 4, "An unresponsive or broken element"},
-	{"dm-m5", 5, "Mask sensitive inputs and disclose it — the recordings are personal data"},
+	{"dm-m5", 2, "Stopping the test as soon as the result looks significant"},
+	{"dm-m5", 3, "Use qualitative evidence such as recordings and support questions, then judge reasoned changes on trend"},
+	{"dm-m5", 4, "An element that is broken, slow or gives no feedback"},
+	{"dm-m5", 5, "Masking sensitive inputs, disclosing it and honouring consent — the recordings are personal data"},
+	{"dm-m5", 6, "It would need roughly 80,000 visitors per variant at 95% confidence and 80% power, so the test can never finish — improve the page by other means"},
+
+	// dm-m6 (6 questions)
+	{"dm-m6", 1, "40%, because in GA4 bounce rate is simply the opposite of engagement rate"},
+	{"dm-m6", 2, "No event has been marked as a key event in the admin settings"},
+	{"dm-m6", 3, "Direct is the leftover bucket, so a large share usually points to untagged links such as email, QR codes or PDFs"},
+	{"dm-m6", 4, "Each tagged internal click starts a new session and re-credits the campaign, destroying the record of the real traffic source"},
+	{"dm-m6", 5, "The number of orders recorded in the business's own order system, with the platform figures shown separately and labelled"},
+	{"dm-m6", 6, "Pause paid social in one region for a fixed period and compare total orders against the rest of the business"},
+
+	// dm-m7 (6 questions)
+	{"dm-m7", 1, "Cut it into several social posts, an email, a short video and reusable sales replies over the following weeks"},
+	{"dm-m7", 2, "Very little that you can reuse, because too many variables changed to identify the cause"},
+	{"dm-m7", 3, "Watch that exact moment to find what caused it — often a logo, a pause or an early sales pitch — and remove it"},
+	{"dm-m7", 4, "The smaller one, because audience fit and demonstrated engagement predict results far better than follower count"},
+	{"dm-m7", 5, "Clear and prominent disclosure such as #ad at the start of the caption, because gifted content with brand control is advertising"},
+	{"dm-m7", 6, "Send only to those who consented or who fall within the narrow soft opt-in, identify the sender, and include a working opt-out in every message"},
+
+	// dm-m8 (6 questions)
+	{"dm-m8", 1, "No: that is personal data in a public tool, so anonymise and aggregate first, or use an invented example"},
+	{"dm-m8", 2, "Delete both figures, supply your real numbers, and add no benchmark you cannot source"},
+	{"dm-m8", 3, "Because UK advertising rules say ads must not mislead or exaggerate a product, and that applies however the image was made"},
+	{"dm-m8", 4, "Producing eight different subject lines for you to shortlist and test"},
+	{"dm-m8", 5, "Spot-check a random sample against the raw text, verify the quotes word for word, and search the raw text for terms you expect"},
+	{"dm-m8", 6, "Refuse: fake reviews are illegal in the UK and breach platform rules, and propose a way to collect real reviews instead"},
+
+	// dm-m9 (6 questions)
+	{"dm-m9", 1, "It has no number, no date and no baseline, so the plan cannot fail and cannot be judged"},
+	{"dm-m9", 2, "Because tracking added afterwards cannot recover data you already lost, and success is easier to define honestly before anyone is defending a result"},
+	{"dm-m9", 3, "State plainly that the goal was missed — 24 against a target of 40 — then explain what worked, where it broke, and what you would do next"},
+	{"dm-m9", 4, "The raw numbers, baseline and timeframe — \"up 200%\" may mean 2 to 6, and omitting them makes the reader distrust the rest"},
+	{"dm-m9", 5, "Genuine volunteer marketing for a local charity, written up with baseline and results"},
+	{"dm-m9", 6, "Several warning signs — no team, mismatched expectations, unpaid trial work, no stated measure of success — so go in with direct questions before accepting"},
+
+	// dm-m1-assignment (6 questions)
+	{"dm-m1-assignment", 1, "Fix the booking step first: 36 of 900 is 4 per cent, so doubling traffic doubles the cost while the same leak loses the same share"},
+	{"dm-m1-assignment", 2, "None of those numbers answers the question, because none of them is tied to a stated goal or to orders and enquiries"},
+	{"dm-m1-assignment", 3, "None of those details would change the wording, the offer or the channel choice, so the persona cannot influence any decision"},
+	{"dm-m1-assignment", 4, "Paid search has little existing demand to capture, so demand must be created first through social, content and partnerships"},
+	{"dm-m1-assignment", 5, "Two separate sources for one newsletter, and internal clicks wrongly recorded as new visits from outside the site"},
+	{"dm-m1-assignment", 6, "CAC is GBP 20 and LTV is about GBP 94.50, because LTV must be calculated on gross profit rather than on total sales"},
+
+	// dm-m2-assignment (6 questions)
+	{"dm-m2-assignment", 1, "Keep a cadence she can hold on a busy week; a schedule that collapses in a month costs more reach than two steady posts"},
+	{"dm-m2-assignment", 2, "The Reel is doing a different job: it is building reach and interest that later promotional posts depend on, and it produced three times the clicks of the promotion anyway"},
+	{"dm-m2-assignment", 3, "Acknowledge the specific double charge publicly, give a named next step and a timeframe, then move to a private message for her account details"},
+	{"dm-m2-assignment", 4, "Correct it once, plainly and pleasantly, with the evidence, leave the comment up, and stop replying after that"},
+	{"dm-m2-assignment", 5, "Ask her, get her agreement in writing, and check she is happy with the specific photo and wording before it goes out"},
+	{"dm-m2-assignment", 6, "Growth at that speed usually means bought or incentivised followers, which will not buy plants and will lower the engagement rate that drives reach"},
+
+	// dm-m3-assignment (6 questions)
+	{"dm-m3-assignment", 1, "Wait: targets need enough conversion volume to learn from, and a target far below the actual CPA will starve the campaign of traffic"},
+	{"dm-m3-assignment", 2, "Exact match includes close variants, which covers the same meaning, plurals and common alternative spellings"},
+	{"dm-m3-assignment", 3, "Both platforms are claiming credit for some of the same sign-ups, so the totals overlap; plan from the gym's own figure of 24"},
+	{"dm-m3-assignment", 4, "Shorten the audience window, exclude recent buyers and add more creative variations, rather than widening the audience to 180 days"},
+	{"dm-m3-assignment", 5, "The two audiences overlap, so the ad sets are competing for the same people and pushing up costs"},
+	{"dm-m3-assignment", 6, "The tags must not fire until the visitor gives consent, and the banner must let them genuinely refuse, under the UK PECR and UK GDPR rules"},
+
+	// dm-m4-assignment (6 questions)
+	{"dm-m4-assignment", 1, "The address was collected for prescription reminders with no marketing opt-out offered, so the soft opt-in does not cleanly apply — ask for consent before marketing to them"},
+	{"dm-m4-assignment", 2, "Move to sending from the gym’s own domain with SPF, DKIM and DMARC set up, add one-click unsubscribe, and bring the complaint rate under 0.3%"},
+	{"dm-m4-assignment", 3, "A pre-ticked box is not valid consent, and prize entrants are a poor fit anyway — email them once to ask them to opt in, and only keep those who do"},
+	{"dm-m4-assignment", 4, "Treat B as the better performer and change the tool to decide on clicks, because privacy features inflate opens and clicks reflect real interest"},
+	{"dm-m4-assignment", 5, "The cart workflow has no working exit condition — set \"exit on order placed\" and re-test it by placing a real order"},
+	{"dm-m4-assignment", 6, "Sending to a large unengaged segment raises bounces and complaints and lowers engagement signals, so the campaign is more likely to land in spam for the 2,200 people who do care"},
+
+	// dm-m5-assignment (6 questions)
+	{"dm-m5-assignment", 1, "At this traffic no colour test could ever reach a trustworthy result — watch session recordings and fix the clearest problems instead"},
+	{"dm-m5-assignment", 2, "Keep running to the planned end date — results fluctuate, and stopping at the first good-looking moment manufactures winners that do not exist"},
+	{"dm-m5-assignment", 3, "Load the tool only after analytics consent, keep input masking on so typed text is never captured, describe it in the privacy policy and set a retention period"},
+	{"dm-m5-assignment", 4, "The message match — make the page headline and button offer the free survey the advert promised"},
+	{"dm-m5-assignment", 5, "With counts this small the gap is well within normal random variation, so the correct conclusion is that no reliable difference has been shown"},
+	{"dm-m5-assignment", 6, "Friction inside the form — check which field people stop on using form analytics or recordings, then remove or reword it"},
+
+	// dm-m6-assignment (6 questions)
+	{"dm-m6-assignment", 1, "Sessions are visits, not customers; the comparison is also affected by an extra weekend and a consent-banner change, so the rise should be reported with both caveats"},
+	{"dm-m6-assignment", 2, "Whether the event is firing more than once per submission, for example on a thank-you page that people reload or because the tag was installed twice"},
+	{"dm-m6-assignment", 3, "The rows cannot be merged retrospectively; report the combined figure manually with a note, then agree a lowercase hyphenated convention and a shared link log"},
+	{"dm-m6-assignment", 4, "A redirect between the short link and the final page is stripping the query string, so the UTMs never arrive"},
+	{"dm-m6-assignment", 5, "Explain that the gap is mostly view-through counting and longer windows rather than the model, so switching will not make them match and will break month-to-month comparability"},
+	{"dm-m6-assignment", 6, "Most of the gap is view-through and window length rather than a tracking fault, so the two tools are behaving as expected"},
+
+	// dm-m7-assignment (6 questions)
+	{"dm-m7-assignment", 1, "It should become a piece of published content, since the answer has already been written eleven times"},
+	{"dm-m7-assignment", 2, "A 400-word post is too thin to yield six genuinely different pieces, so one deeper monthly asset would repurpose far better"},
+	{"dm-m7-assignment", 3, "Cut the logo and the wide shot, open mid-action, and add on-screen text so the video works with the sound off"},
+	{"dm-m7-assignment", 4, "Creative fatigue — the same audience has seen it too often, so a refreshed creative is needed"},
+	{"dm-m7-assignment", 5, "Refuse, because the CAP Code requires paid content to be obviously identifiable as advertising and both brand and creator are responsible"},
+	{"dm-m7-assignment", 6, "Pause the affiliate's account while you investigate, check for self-referrals and cookie stuffing, and apply the clawback terms in the agreement"},
+
+	// dm-m8-assignment (6 questions)
+	{"dm-m8-assignment", 1, "Use AI for structure and plain-English drafting only, supply the approved claims yourself, and have a qualified person approve the final wording"},
+	{"dm-m8-assignment", 2, "Delete the whole comparison, because it came from nowhere you can trace"},
+	{"dm-m8-assignment", 3, "Adding the business, the audience, the real facts it may use, and a ban on inventing anything"},
+	{"dm-m8-assignment", 4, "AI content is acceptable where it is helpful and people-first; scaled content abuse — mass pages made mainly to game rankings — is the spam violation"},
+	{"dm-m8-assignment", 5, "Someone will paste customer or confidential data into a public tool because nobody told them not to"},
+	{"dm-m8-assignment", 6, "\"Below are 400 anonymised reviews. Group the complaints into themes, give the number in each, and quote three word for word. Do not create a theme that is not in the text.\""},
+
+	// dm-m9-assignment (6 questions)
+	{"dm-m9-assignment", 1, "Work backwards: 80 sales at 2% means roughly 4,000 relevant visits, then check whether the budget can realistically buy that"},
+	{"dm-m9-assignment", 2, "An office manager asked to sort a birthday cake by Thursday who does not want to look careless"},
+	{"dm-m9-assignment", 3, "It lets you move money to whichever channel is actually performing once real data arrives"},
+	{"dm-m9-assignment", 4, "Replace tasks with decisions and reasons, and add baseline numbers, results and a timeframe"},
+	{"dm-m9-assignment", 5, "State the result plainly, explain what you diagnosed and why, and say specifically what you would do differently"},
+	{"dm-m9-assignment", 6, "Agency gives broad, fast experience across many clients; in-house gives depth on one business and lets you see results over months"},
 
 	// frontend-m1 (4 questions)
 	{"frontend-m1", 1, "A. HyperText Markup Language"},

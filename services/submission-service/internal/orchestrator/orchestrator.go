@@ -33,6 +33,10 @@ type GradedEvent struct {
 	MemoryKb      int64  `json:"memory_kb"`
 	PassedCount   int    `json:"passed_count"`
 	TotalCount    int    `json:"total_count"`
+	// Source is "assessment" for a timed-test submission. The assessment
+	// consumer uses it to tell "not linked to an attempt yet" apart from
+	// "ordinary practice submission".
+	Source string `json:"source,omitempty"`
 }
 
 // Orchestrator manages submission lifecycle.
@@ -73,6 +77,7 @@ func (o *Orchestrator) Submit(ctx context.Context, req *submissionv1.SubmitReque
 		Language:     req.Language,
 		Code:         req.Code,
 		UserId:       req.UserId,
+		Source:       req.Source,
 	}
 
 	data, err := json.Marshal(execReq)
@@ -121,6 +126,7 @@ func (o *Orchestrator) listenForResults() {
 				ExecutionMs:    tr.ExecutionMs,
 				MemoryKb:       tr.MemoryKb,
 				Error:          tr.Error,
+				IsHidden:       tr.IsHidden,
 			}
 			trResults = append(trResults, subTR)
 			if tr.Status == "Accepted" {
@@ -151,8 +157,10 @@ func (o *Orchestrator) listenForResults() {
 			o.log.Warn("could not load submission details for language info", zap.Error(err))
 		}
 
-		// Update progress service
-		if o.progressCli != nil && result.OverallStatus == "Accepted" {
+		// Update progress service. Timed-test submissions are scored by the
+		// test; they must not earn practice XP or mark a private problem solved.
+		isAssessment := result.Source == "assessment"
+		if o.progressCli != nil && !isAssessment && result.OverallStatus == "Accepted" {
 			_, err := o.progressCli.UpdateProblemStatus(ctx, &progressv1.UpdateProblemStatusRequest{
 				UserId:    result.UserId,
 				ProblemId: result.ProblemId,
@@ -165,7 +173,7 @@ func (o *Orchestrator) listenForResults() {
 			if err != nil {
 				o.log.Warn("update progress failed", zap.Error(err))
 			}
-		} else if o.progressCli != nil {
+		} else if o.progressCli != nil && !isAssessment {
 			_, err := o.progressCli.UpdateProblemStatus(ctx, &progressv1.UpdateProblemStatusRequest{
 				UserId:    result.UserId,
 				ProblemId: result.ProblemId,
@@ -178,6 +186,13 @@ func (o *Orchestrator) listenForResults() {
 			}
 		}
 
+		// Practice stops at the first failing case, so the results slice can
+		// be shorter than the problem's case count. Divide by the real total.
+		totalCount := result.TotalCases
+		if totalCount < len(trResults) {
+			totalCount = len(trResults) // result from a worker older than TotalCases
+		}
+
 		// Publish graded event for the notification service
 		event := &GradedEvent{
 			SubmissionId:  result.SubmissionId,
@@ -187,7 +202,8 @@ func (o *Orchestrator) listenForResults() {
 			RuntimeMs:     result.Runtime,
 			MemoryKb:      result.Memory,
 			PassedCount:   passedCount,
-			TotalCount:    len(trResults),
+			TotalCount:    totalCount,
+			Source:        result.Source,
 		}
 		eventData, _ := json.Marshal(event)
 		if _, err := o.js.Publish(subjectSubmissionGraded, eventData); err != nil {

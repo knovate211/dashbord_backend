@@ -10,6 +10,7 @@ package consumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -32,7 +33,13 @@ type gradedEvent struct {
 	OverallStatus string `json:"overall_status"`
 	PassedCount   int    `json:"passed_count"`
 	TotalCount    int    `json:"total_count"`
+	Source        string `json:"source"`
 }
+
+// maxLinkRetries bounds how long a test verdict waits for its attempt link.
+// RecordCodeSubmission runs right after Submit returns, so a few seconds is
+// plenty; the bound only stops a genuinely orphaned event looping forever.
+const maxLinkRetries = 10
 
 // Consumer subscribes to graded submissions.
 type Consumer struct {
@@ -85,8 +92,23 @@ func (c *Consumer) handle(msg *nats.Msg) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := c.repo.ApplyGradedSubmission(ctx, ev.SubmissionId, ev.OverallStatus,
-		int32(ev.PassedCount), int32(ev.TotalCount)); err != nil {
+	err := c.repo.ApplyGradedSubmission(ctx, ev.SubmissionId, ev.OverallStatus,
+		int32(ev.PassedCount), int32(ev.TotalCount))
+	if errors.Is(err, repository.ErrSubmissionNotLinked) {
+		// Practice submissions never link to an attempt. A test submission
+		// can be graded before its attempt link is written — wait for it.
+		if ev.Source == "assessment" {
+			if meta, mErr := msg.Metadata(); mErr == nil && meta.NumDelivered < maxLinkRetries {
+				msg.NakWithDelay(time.Second) //nolint:errcheck
+				return
+			}
+			c.log.Error("test submission never linked to an attempt",
+				zap.String("submission_id", ev.SubmissionId))
+		}
+		msg.Ack() //nolint:errcheck
+		return
+	}
+	if err != nil {
 		// A transient database failure is worth retrying: leave it unacked.
 		c.log.Error("apply graded submission",
 			zap.String("submission_id", ev.SubmissionId), zap.Error(err))

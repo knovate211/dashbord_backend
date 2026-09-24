@@ -30,6 +30,9 @@ type TestResult struct {
 	ExecutionMs int64  `json:"execution_ms"`
 	MemoryKb    int64  `json:"memory_kb"`
 	Error       string `json:"error,omitempty"`
+	// IsHidden marks a hidden test case. Callers facing a learner must blank
+	// its input and outputs — the hidden cases are the grading secret.
+	IsHidden bool `json:"is_hidden,omitempty"`
 }
 
 type RunCodeResponse struct {
@@ -67,6 +70,9 @@ type SubmitCodeRequest struct {
 	Language     string `json:"language"`
 	Code         string `json:"code"`
 	UserId       string `json:"user_id"`
+	// Source is "assessment" for a timed-test submission, empty for practice.
+	// Assessment submissions run every test case so partial marks are fair.
+	Source string `json:"source,omitempty"`
 }
 
 type SubmitCodeResponse struct {
@@ -83,6 +89,10 @@ type ExecutionResult struct {
 	CompileError  string        `json:"compile_error,omitempty"`
 	Runtime       int64         `json:"runtime_ms"`
 	Memory        int64         `json:"memory_kb"`
+	// TotalCases is how many test cases the problem has. Practice runs stop
+	// at the first failure, so len(TestResults) can be smaller.
+	TotalCases int    `json:"total_cases"`
+	Source     string `json:"source,omitempty"` // echoed from SubmitCodeRequest
 }
 
 // GenerateStartersRequest describes a function-mode signature. The execution
