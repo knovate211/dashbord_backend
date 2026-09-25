@@ -453,7 +453,7 @@ func (r *Repo) ExportResults(ctx context.Context, req *assessmentv1.ExportResult
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
 	header := []string{"Rank", "Name", "Email", "Status", "Score", "Max Score",
-		"Percent", "Passed", "Integrity", "Decision", "Started", "Submitted"}
+		"Percent", "Passed", "Integrity", "Decision", "Started", "Submitted", "Time taken (min)"}
 	if err := w.Write(header); err != nil {
 		return nil, fmt.Errorf("write csv header: %w", err)
 	}
@@ -472,6 +472,7 @@ func (r *Repo) ExportResults(ctx context.Context, req *assessmentv1.ExportResult
 			s.Decision,
 			s.StartedAt,
 			s.SubmittedAt,
+			minutesBetween(s.StartedAt, s.SubmittedAt),
 		}
 		if err := w.Write(row); err != nil {
 			return nil, fmt.Errorf("write csv row: %w", err)
@@ -503,4 +504,15 @@ func slugify(s string) string {
 		return "assessment"
 	}
 	return out
+}
+
+// minutesBetween is the time taken, in minutes to one decimal, or "" while the
+// attempt is still running.
+func minutesBetween(start, end string) string {
+	a, err1 := time.Parse(time.RFC3339, start)
+	b, err2 := time.Parse(time.RFC3339, end)
+	if err1 != nil || err2 != nil || b.Before(a) {
+		return ""
+	}
+	return strconv.FormatFloat(b.Sub(a).Minutes(), 'f', 1, 64)
 }

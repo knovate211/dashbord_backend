@@ -140,6 +140,18 @@ func IntegrityPenalty(kind string) float64 {
 		return 5
 	case "disconnect":
 		return 2
+	// A second session on the same attempt is the test open on another tab or
+	// device — the setup for someone else to help, or to sit it for them.
+	case "duplicate_session":
+		return 20
+	case "multi_monitor", "screenshot":
+		return 10
+	// A new IP mid-test is often innocent (Wi-Fi to hotspot), so it is light.
+	case "ip_change":
+		return 8
+	// Shrinking the window to sit a chatbot beside the test.
+	case "window_resized":
+		return 3
 	default:
 		return 2
 	}

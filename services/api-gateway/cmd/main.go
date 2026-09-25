@@ -206,6 +206,18 @@ func main() {
 			log.Info("hiring candidates registered at /api/hiring/")
 		}
 
+		// Integrity: device sessions, code playback snapshots and the reviewer
+		// report (similar code, shared wrong answers, AI signals). Every route
+		// needs a session; candidates may only write to their own live attempt
+		// and reviewers only read their own company's tests.
+		integrityHandler, err := resolvers.NewIntegrityHandler(context.Background(), adminPool, assessmentSvcClient, log)
+		if err != nil {
+			log.Error("integrity handler init failed — integrity report disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/integrity/", integrityHandler)
+			log.Info("integrity endpoints registered at /api/integrity/")
+		}
+
 		// Live classes and attendance. Every route needs a signed-in user; the
 		// handler checks course enrolment itself, and the schedule screens sit
 		// under /api/admin/ behind the role guard.
