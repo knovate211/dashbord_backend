@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/knovate211/pkg/ids"
 	submissionv1 "github.com/knovate211/proto/submission/v1"
 )
 
@@ -39,6 +40,9 @@ func (r *SubmissionRepository) CreateSubmission(ctx context.Context, req *submis
 
 // UpdateSubmissionResult updates a submission after execution completes.
 func (r *SubmissionRepository) UpdateSubmissionResult(ctx context.Context, id, status string, runtimeMs, memoryKb int64, compileError string, testResults []*submissionv1.TestResult) error {
+	if !ids.IsUUID(id) {
+		return nil // matches no row, as the update would
+	}
 	trJSON, err := json.Marshal(testResults)
 	if err != nil {
 		return fmt.Errorf("marshal test results: %w", err)
@@ -52,7 +56,7 @@ func (r *SubmissionRepository) UpdateSubmissionResult(ctx context.Context, id, s
 		       compile_error = $4,
 		       test_results  = $5,
 		       completed_at  = $6
-		WHERE  id::text = $7
+		WHERE  id = $7
 	`, status, runtimeMs, memoryKb, compileError, trJSON, time.Now().UTC(), id)
 	if err != nil {
 		return fmt.Errorf("update submission result: %w", err)
@@ -67,12 +71,15 @@ func (r *SubmissionRepository) GetSubmission(ctx context.Context, id string) (*s
 	var completedAt *time.Time
 	var submittedAt time.Time
 
+	if !ids.IsUUID(id) {
+		return nil, fmt.Errorf("submission not found: %s", id)
+	}
 	err := r.pool.QueryRow(ctx, `
 		SELECT id::text, user_id, problem_id::text, language, code,
 		       status, runtime_ms, memory_kb, COALESCE(compile_error,''),
 		       test_results, submitted_at, completed_at
 		FROM   submissions
-		WHERE  id::text = $1
+		WHERE  id = $1
 	`, id).Scan(
 		&s.Id, &s.UserId, &s.ProblemId, &s.Language, &s.Code,
 		&s.Status, &s.RuntimeMs, &s.MemoryKb, &s.CompileError,

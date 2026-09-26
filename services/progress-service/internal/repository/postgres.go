@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/knovate211/pkg/ids"
 	progressv1 "github.com/knovate211/proto/progress/v1"
 )
 
@@ -70,11 +71,14 @@ func (r *ProgressRepository) GetProblemStatus(ctx context.Context, req *progress
 		Status:    "Unsolved",
 	}
 
+	if !ids.IsUUID(req.ProblemId) {
+		return ps, nil // no such problem, so no progress on it
+	}
 	var solvedAt *time.Time
 	err := r.pool.QueryRow(ctx, `
 		SELECT status, solved_at, attempts
 		FROM   problem_progress
-		WHERE  user_id = $1 AND problem_id::text = $2
+		WHERE  user_id = $1 AND problem_id = $2
 	`, req.UserId, req.ProblemId).Scan(&ps.Status, &solvedAt, &ps.Attempts)
 
 	if err != nil && err != pgx.ErrNoRows {
@@ -89,6 +93,9 @@ func (r *ProgressRepository) GetProblemStatus(ctx context.Context, req *progress
 
 // UpdateProblemStatus updates a user's problem status and aggregate progress.
 func (r *ProgressRepository) UpdateProblemStatus(ctx context.Context, req *progressv1.UpdateProblemStatusRequest) (*progressv1.UpdateProblemStatusResponse, error) {
+	if !ids.IsUUID(req.ProblemId) {
+		return nil, fmt.Errorf("get problem details: %w", pgx.ErrNoRows)
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
@@ -104,7 +111,7 @@ func (r *ProgressRepository) UpdateProblemStatus(ctx context.Context, req *progr
 
 	err = tx.QueryRow(ctx, `
 		SELECT status FROM problem_progress
-		WHERE  user_id = $1 AND problem_id::text = $2
+		WHERE  user_id = $1 AND problem_id = $2
 	`, req.UserId, req.ProblemId).Scan(&currentStatus)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -125,7 +132,7 @@ func (r *ProgressRepository) UpdateProblemStatus(ctx context.Context, req *progr
 	err = tx.QueryRow(ctx, `
 		SELECT difficulty, set_id::text, xp
 		FROM   problems
-		WHERE  id::text = $1
+		WHERE  id = $1
 	`, req.ProblemId).Scan(&difficulty, &setID, &problemXP)
 	if err != nil {
 		return nil, fmt.Errorf("get problem details: %w", err)
@@ -220,7 +227,7 @@ func (r *ProgressRepository) UpdateProblemStatus(ctx context.Context, req *progr
 	// Upsert set_progress if problem belongs to a practice set
 	if setIDStr != "" {
 		var totalProblems int32
-		err = tx.QueryRow(ctx, "SELECT COUNT(*) FROM problems WHERE set_id::text = $1", setIDStr).Scan(&totalProblems)
+		err = tx.QueryRow(ctx, "SELECT COUNT(*) FROM problems WHERE set_id = $1", setIDStr).Scan(&totalProblems)
 		if err != nil {
 			return nil, fmt.Errorf("count problems in set: %w", err)
 		}

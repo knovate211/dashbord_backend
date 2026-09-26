@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +42,9 @@ func main() {
 	cfg := loadConfig()
 	log := pkglog.New(cfg.logLevel)
 	defer log.Sync() //nolint:errcheck
+	if err := cfg.checkProduction(); err != nil {
+		log.Fatal("refusing to start with an unsafe production config", zap.Error(err))
+	}
 
 	// ── Admin DB Pool (shared DATABASE_URL with user-service) ─────────────────
 	var adminPool *pgxpool.Pool
@@ -230,6 +235,18 @@ func main() {
 			log.Info("attendance registered at /api/attendance/")
 		}
 
+		// The referral programme. Creating a link and opening one are public —
+		// a referrer may have no account and their friend certainly does not.
+		referralHandler, err := resolvers.NewReferralHandler(
+			context.Background(), adminPool, log, cfg.siteBaseURL, resolvers.NewScholarshipMailer(log))
+		if err != nil {
+			log.Error("referral handler init failed — referrals disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/referral/", referralHandler)
+			adminHandler.Referrals = referralHandler
+			log.Info("referral programme registered at /api/referral/")
+		}
+
 		// Online course purchase through Razorpay. config/order/verify/webhook
 		// are public (listed in publicPaths below) — the buyer may not have an
 		// account yet; paying is what creates it. The order list lives under
@@ -238,8 +255,33 @@ func main() {
 		if err != nil {
 			log.Error("enrolment handler init failed — online enrolment disabled", zap.Error(err))
 		} else {
+			// Referral codes ride along with a checkout: the handler prices the
+			// discount itself and books the reward once the payment clears.
+			enrollHandler.Referrals = referralHandler
 			mux.Handle("/api/enroll/", enrollHandler)
 			adminHandler.Enroll = enrollHandler
+		}
+
+		// Certification exams. Registration and payment are public — a candidate
+		// buying an exam has no account yet, which is the point of the flow —
+		// as is credential verification, which an employer hits with no login.
+		// Everything else sits behind a session or the admin role guard.
+		certificationHandler, err := resolvers.NewCertificationHandler(
+			context.Background(), adminPool, log, cfg.jwtSecret, cfg.appBaseURL, cfg.siteBaseURL,
+			resolvers.NewScholarshipMailer(log))
+		if err != nil {
+			log.Error("certification handler init failed — certification exams disabled", zap.Error(err))
+		} else {
+			certificationHandler.Referrals = referralHandler
+			mux.Handle("/api/certification/", certificationHandler)
+			adminHandler.Certifications = certificationHandler
+			// Retires exam links that lapsed without ever being used, so the
+			// admin list separates a candidate about to sit their exam from one
+			// who paid and walked away.
+			certificationHandler.StartExpirySweeper(context.Background(),
+				time.Duration(envInt("CERTIFICATION_SWEEP_MIN", 15))*time.Minute)
+			log.Info("certification exams registered at /api/certification/",
+				zap.String("site_base_url", cfg.siteBaseURL))
 		}
 
 		// Self-service password reset. Public for the same reason as the
@@ -293,7 +335,19 @@ func main() {
 		"/api/password-reset/request", "/api/password-reset/confirm",
 		"/api/scholarship/config", "/api/scholarship/apply", "/api/scholarship/claim",
 		"/api/hiring/claim",
-		"/api/enroll/config", "/api/enroll/order", "/api/enroll/verify", "/api/enroll/webhook")
+		"/api/enroll/config", "/api/enroll/order", "/api/enroll/verify", "/api/enroll/webhook",
+		// Certification: someone registering and paying for an exam has no
+		// account yet, and credential verification is for employers, who never
+		// will have one. /outcome is deliberately absent — reading a result
+		// needs the candidate's session.
+		"/api/certification/config", "/api/certification/order",
+		"/api/certification/verify", "/api/certification/webhook",
+		"/api/certification/claim", "/api/certification/credential",
+		// Referrals: the person asking for a link, and the friend opening one,
+		// are both strangers to us at that moment. /status is public too — it
+		// needs the code AND the matching email, which only the referrer has.
+		"/api/referral/config", "/api/referral/join", "/api/referral/resolve",
+		"/api/referral/click", "/api/referral/status")
 	corsMW := middleware.CORS(cfg.allowedOrigins)
 
 	handler := corsMW(authMW(mux))
@@ -351,6 +405,7 @@ type config struct {
 	jwtPublicKey           string
 	allowedOrigins         string
 	appBaseURL             string // test portal origin, for scholarship claim links
+	siteBaseURL            string // marketing site origin, for credential verification links
 	databaseURL            string // for admin panel direct DB access
 	devMode                bool
 	logLevel               string
@@ -366,17 +421,49 @@ func loadConfig() config {
 		assessmentServiceAddr:  env("ASSESSMENT_SERVICE_ADDR", "localhost:50056"),
 		userServiceAddr:        env("USER_SERVICE_ADDR", "localhost:50055"),
 		notificationServiceURL: env("NOTIFICATION_SERVICE_URL", "http://localhost:8081"),
-		jwtSecret:              env("JWT_SECRET", "dev-secret-change-in-production"),
+		jwtSecret:              env("JWT_SECRET", defaultJWTSecret),
 		jwtPublicKey:           env("JWT_PUBLIC_KEY", ""),
 		allowedOrigins:         env("ALLOWED_ORIGINS", "*"),
 		// Where a scholarship applicant is sent to sit their test. Must be the
 		// portal's public origin in production — the claim link is built from
 		// it, and a wrong value sends applicants nowhere.
-		appBaseURL:  env("APP_BASE_URL", "http://localhost:5173"),
+		appBaseURL: env("APP_BASE_URL", "http://localhost:5173"),
+		// Where a certificate says it can be verified. Must be the marketing
+		// site's public origin in production, or every credential on a printed
+		// certificate points at a machine nobody can reach.
+		siteBaseURL: env("SITE_BASE_URL", "http://localhost:3000"),
 		databaseURL: env("DATABASE_URL", ""), // shared with user-service
 		devMode:     env("DEV_MODE", "true") == "true",
 		logLevel:    env("LOG_LEVEL", "info"),
 	}
+}
+
+// defaultJWTSecret is the development fallback. Anyone who has read this file
+// can sign tokens with it, including admin ones.
+const defaultJWTSecret = "dev-secret-change-in-production"
+
+// checkProduction stops a production gateway from coming up on development
+// fallbacks. A missing variable would otherwise start it quietly with a
+// publicly known signing secret or with CORS open to every site. Development
+// (DEV_MODE unset or "true") keeps the fallbacks.
+func (c config) checkProduction() error {
+	if c.devMode {
+		return nil
+	}
+	var problems []string
+	if c.jwtPublicKey == "" && c.jwtSecret == defaultJWTSecret {
+		problems = append(problems, "JWT_SECRET is unset or still the development default")
+	}
+	for _, o := range strings.Split(c.allowedOrigins, ",") {
+		if strings.TrimSpace(o) == "*" {
+			problems = append(problems, "ALLOWED_ORIGINS is unset or contains *; list the site origins")
+			break
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // envInt reads a positive integer setting, falling back when unset or nonsense.

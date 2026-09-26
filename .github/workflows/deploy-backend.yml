@@ -30,6 +30,8 @@ jobs:
             dockerfile: services/execution-service/Dockerfile
           - name: notification-service
             dockerfile: services/notification-service/Dockerfile
+          - name: assessment-service
+            dockerfile: services/assessment-service/Dockerfile
           - name: user-service
             dockerfile: services/user-service/Dockerfile
 
@@ -119,7 +121,7 @@ jobs:
 
       - name: Package and Copy files to EC2
         run: |
-          tar -czf migrations.tar.gz services/problem-service/migrations services/submission-service/migrations services/progress-service/migrations
+          tar -czf migrations.tar.gz services/problem-service/migrations services/submission-service/migrations services/progress-service/migrations services/assessment-service/migrations
           scp -o StrictHostKeyChecking=no docker-compose.yml docker-compose.prod.yml migrations.tar.gz ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:~/app/
 
       - name: SSH and Deploy

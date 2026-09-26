@@ -22,7 +22,8 @@ services:
       - |
         /migrate -path=/migrations/problem-service -database "$${POSTGRES_DSN}&x-migrations-table=schema_migrations_problem" up && \
         /migrate -path=/migrations/submission-service -database "$${POSTGRES_DSN}&x-migrations-table=schema_migrations_submission" up && \
-        /migrate -path=/migrations/progress-service -database "$${POSTGRES_DSN}&x-migrations-table=schema_migrations_progress" up
+        /migrate -path=/migrations/progress-service -database "$${POSTGRES_DSN}&x-migrations-table=schema_migrations_progress" up && \
+        /migrate -path=/migrations/assessment-service -database "$${POSTGRES_DSN}&x-migrations-table=schema_migrations_assessment" up
 
   redis:
     restart: always
@@ -32,11 +33,13 @@ services:
       --maxmemory-policy allkeys-lru
       --save ""
       --requirepass ${REDIS_PASSWORD}
-    ports: []   # No external exposure — internal only
+    # `ports: []` does not clear the base file's ports (Compose appends port
+    # lists); they are kept off the internet by binding to 127.0.0.1 there.
+    ports: []
 
   nats:
     restart: always
-    ports: []   # No external exposure — internal only
+    ports: []   # see the redis note above
 
   # ─── Microservice overrides ───────────────────────────────────────────────
   problem-service:
@@ -46,6 +49,8 @@ services:
     environment:
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_ADDR: ${REDIS_ADDR}
+      # Redis runs with --requirepass; without this the cache silently stays off.
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       LOG_LEVEL: warn
 
   execution-service:
@@ -73,6 +78,7 @@ services:
     environment:
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_ADDR: ${REDIS_ADDR}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       LOG_LEVEL: warn
 
   notification-service:
@@ -91,6 +97,20 @@ services:
       POSTGRES_DSN: ${POSTGRES_DSN}
       LOG_LEVEL: warn
 
+  assessment-service:
+    image: ${ECR_REGISTRY}/skillofide-assessment-service:latest
+    build: ~
+    restart: always
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      NATS_URL: ${NATS_URL}
+      SUBMISSION_SERVICE_ADDR: submission-service:50053
+      EXECUTION_SERVICE_ADDR: execution-service:50052
+      GRPC_PORT: "50056"
+      SWEEP_INTERVAL_SECONDS: "30"
+      LOG_LEVEL: warn
+    ports: []   # see the redis note above
+
   api-gateway:
     image: ${ECR_REGISTRY}/skillofide-api-gateway:latest
     build: ~
@@ -103,6 +123,23 @@ services:
       PROGRESS_SERVICE_ADDR: progress-service:50054
       USER_SERVICE_ADDR: user-service:50055
       NOTIFICATION_SERVICE_URL: http://notification-service:8081
+      ASSESSMENT_SERVICE_ADDR: assessment-service:50056
+      # The gateway talks to Postgres directly for enquiries, scholarships,
+      # certifications, attendance, payments and password reset. Without this
+      # it starts with those endpoints silently disabled.
+      DATABASE_URL: ${POSTGRES_DSN}
+      # Where a candidate is sent to sit a test. Wrong value = dead links in
+      # every scholarship, hiring and certification email.
+      APP_BASE_URL: ${APP_BASE_URL}
+      SITE_BASE_URL: ${SITE_BASE_URL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM}
+      INQUIRY_NOTIFY_TO: ${INQUIRY_NOTIFY_TO}
+      SCHOLARSHIP_NOTIFY_TO: ${SCHOLARSHIP_NOTIFY_TO}
+      CERTIFICATION_NOTIFY_TO: ${CERTIFICATION_NOTIFY_TO}
       JWT_SECRET: ${JWT_SECRET}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
       DEV_MODE: "false"

@@ -43,6 +43,10 @@ type EnrollHandler struct {
 	Pool   *pgxpool.Pool
 	Log    *zap.Logger
 	Mailer *userMailer
+	// Referrals prices the friend discount and books the referrer's reward.
+	// nil when the referral programme is unavailable, which changes nothing
+	// about buying a course.
+	Referrals *ReferralHandler
 
 	keyID, keySecret, webhookSecret string
 	apiBase                         string
@@ -151,6 +155,12 @@ func (h *EnrollHandler) ensureTable(ctx context.Context) error {
 			paid_at             TIMESTAMPTZ,
 			updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
+		-- Who sent this buyer, and what it cost us. Stored on the order so
+		-- attribution survives a refund, a dispute, or a support call months
+		-- later — the referral row can be read back from here, not the reverse.
+		ALTER TABLE enrollment_orders ADD COLUMN IF NOT EXISTS referral_code TEXT NOT NULL DEFAULT '';
+		ALTER TABLE enrollment_orders ADD COLUMN IF NOT EXISTS referral_discount_paise BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE enrollment_orders ADD COLUMN IF NOT EXISTS referral_flags TEXT NOT NULL DEFAULT '';
 		CREATE INDEX IF NOT EXISTS idx_enroll_orders_created ON enrollment_orders(created_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_enroll_orders_status  ON enrollment_orders(status);
 		CREATE INDEX IF NOT EXISTS idx_enroll_orders_email   ON enrollment_orders(lower(email));
@@ -218,11 +228,12 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		CourseID string `json:"course_id"`
-		Plan     string `json:"plan"`
-		Name     string `json:"name"`
-		Email    string `json:"email"`
-		Phone    string `json:"phone"`
+		CourseID     string `json:"course_id"`
+		Plan         string `json:"plan"`
+		Name         string `json:"name"`
+		Email        string `json:"email"`
+		Phone        string `json:"phone"`
+		ReferralCode string `json:"referral_code"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil {
 		h.fail(w, http.StatusBadRequest, "invalid request")
@@ -260,17 +271,28 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The referral discount is priced here, never by the browser: the request
+	// carries a code, and the server decides what — if anything — it is worth.
+	amountPaise := int64(rupees) * 100
+	var quote referralQuote
+	if h.Referrals != nil && req.ReferralCode != "" {
+		quote = h.Referrals.Quote(ctx, req.ReferralCode, email, phone, referralKindCourse, amountPaise)
+		amountPaise -= quote.DiscountPaise
+	}
+
 	var orderRowID string
 	if err := h.Pool.QueryRow(ctx, `
-		INSERT INTO enrollment_orders (course_id, course_name, plan, amount_paise, name, email, phone)
-		VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id::text`,
-		req.CourseID, courseName, req.Plan, int64(rupees)*100, name, email, phone).Scan(&orderRowID); err != nil {
+		INSERT INTO enrollment_orders (course_id, course_name, plan, amount_paise, name, email, phone,
+		                               referral_code, referral_discount_paise, referral_flags)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id::text`,
+		req.CourseID, courseName, req.Plan, amountPaise, name, email, phone,
+		quote.Code, quote.DiscountPaise, quote.Flags).Scan(&orderRowID); err != nil {
 		h.Log.Error("insert enrollment order failed", zap.Error(err))
 		h.fail(w, http.StatusInternalServerError, "could not start the payment — please try again")
 		return
 	}
 
-	rzpOrderID, err := h.createRazorpayOrder(ctx, int64(rupees)*100, orderRowID, map[string]string{
+	rzpOrderID, err := h.createRazorpayOrder(ctx, amountPaise, orderRowID, map[string]string{
 		"course_id": req.CourseID, "plan": req.Plan, "email": email,
 	})
 	if err != nil {
@@ -290,11 +312,16 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 	h.write(w, http.StatusOK, map[string]any{
 		"key_id":      h.keyID,
 		"order_id":    rzpOrderID,
-		"amount":      int64(rupees) * 100,
+		"amount":      amountPaise,
 		"currency":    "INR",
 		"course_name": courseName,
 		"plan_name":   planNames[req.Plan],
-		"prefill":     map[string]string{"name": name, "email": email, "contact": phone},
+		// So the order summary can show what the referral took off, and the
+		// buyer can see why the total changed.
+		"list_amount":       int64(rupees) * 100,
+		"referral_discount": quote.DiscountPaise,
+		"referral_code":     quote.Code,
+		"prefill":           map[string]string{"name": name, "email": email, "contact": phone},
 	})
 }
 
@@ -418,6 +445,8 @@ type fulfilResult struct {
 func (h *EnrollHandler) fulfil(ctx context.Context, rzpOrderID, paymentID string) (*fulfilResult, error) {
 	var (
 		rowID, courseID, courseName, plan, name, email string
+		referralCode, referralFlags                    string
+		amountPaise, referralDiscount                  int64
 	)
 	err := h.Pool.QueryRow(ctx, `
 		UPDATE enrollment_orders
@@ -426,8 +455,10 @@ func (h *EnrollHandler) fulfil(ctx context.Context, rzpOrderID, paymentID string
 		   -- 'failed' too: a verified payment whose account setup errored is
 		   -- retried by the next verify / webhook instead of staying stuck.
 		   AND status IN ('created', 'failed')
-		RETURNING id::text, course_id, course_name, plan, name, email`,
-		rzpOrderID, paymentID).Scan(&rowID, &courseID, &courseName, &plan, &name, &email)
+		RETURNING id::text, course_id, course_name, plan, name, email,
+		          referral_code, referral_discount_paise, referral_flags, amount_paise`,
+		rzpOrderID, paymentID).Scan(&rowID, &courseID, &courseName, &plan, &name, &email,
+		&referralCode, &referralDiscount, &referralFlags, &amountPaise)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Already handled (or unknown). Report the stored outcome.
 		var status string
@@ -470,6 +501,14 @@ func (h *EnrollHandler) fulfil(ctx context.Context, rzpOrderID, paymentID string
 			emailed = true
 		}
 	}
+	// Booked after the student is enrolled, so a reward never exists for a
+	// purchase that did not complete. Recording it is idempotent on the order,
+	// which is what makes the verify/webhook race harmless here too.
+	if h.Referrals != nil && referralCode != "" {
+		h.Referrals.RecordConversion(ctx, referralKindCourse, rowID, referralCode,
+			name, email, courseName, referralFlags, amountPaise, referralDiscount)
+	}
+
 	h.Log.Info("course purchased online",
 		zap.String("course", courseID), zap.String("plan", plan), zap.Bool("new_account", newAccount))
 	return &fulfilResult{Status: "enrolled", Email: email, CourseName: courseName, PlanName: planNames[plan],

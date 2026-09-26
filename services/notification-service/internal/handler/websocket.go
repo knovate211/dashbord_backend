@@ -23,10 +23,16 @@ var upgrader = websocket.Upgrader{
 }
 
 // Client represents a single WebSocket connection.
+//
+// send is never closed: a broadcast may still hold the client after it has
+// disconnected, and sending on a closed channel panics. Shutdown is signalled
+// by closing done instead, exactly once.
 type Client struct {
-	userID string
-	conn   *websocket.Conn
-	send   chan []byte
+	userID    string
+	conn      *websocket.Conn
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // Hub manages all active WebSocket connections.
@@ -67,6 +73,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		userID: userID,
 		conn:   conn,
 		send:   make(chan []byte, 64),
+		done:   make(chan struct{}),
 	}
 
 	h.register(client)
@@ -87,21 +94,8 @@ func (h *Hub) Broadcast(userID string, event *notificationv1.WebSocketEvent) {
 		return
 	}
 
-	h.mu.RLock()
-	clients, ok := h.clients[userID]
-	h.mu.RUnlock()
-
-	if !ok {
-		return // user not connected
-	}
-
-	for c := range clients {
-		select {
-		case c.send <- data:
-		default:
-			// Send buffer full — client is slow; disconnect
-			h.unregister(c)
-		}
+	for _, c := range h.snapshot(userID) {
+		h.deliver(c, data)
 	}
 }
 
@@ -113,17 +107,39 @@ func (h *Hub) BroadcastAll(event *notificationv1.WebSocketEvent) {
 		return
 	}
 
+	for _, c := range h.snapshot("") {
+		h.deliver(c, data)
+	}
+}
+
+// snapshot copies the clients of one user, or of everyone when userID is "",
+// so they can be sent to without holding the lock. The map itself must not be
+// read after unlocking: a concurrent register or unregister would make that a
+// fatal concurrent map access.
+func (h *Hub) snapshot(userID string) []*Client {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-
-	for _, clients := range h.clients {
-		for c := range clients {
-			select {
-			case c.send <- data:
-			default:
-				go h.unregister(c)
-			}
+	var out []*Client
+	for uid, clients := range h.clients {
+		if userID != "" && uid != userID {
+			continue
 		}
+		for c := range clients {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// deliver queues data for one client, disconnecting it if it cannot keep up.
+func (h *Hub) deliver(c *Client, data []byte) {
+	select {
+	case c.send <- data:
+	case <-c.done:
+		// Already disconnected.
+	default:
+		// Send buffer full — client is slow; disconnect
+		h.unregister(c)
 	}
 }
 
@@ -136,18 +152,23 @@ func (h *Hub) register(c *Client) {
 	h.clients[c.userID][c] = struct{}{}
 }
 
+// unregister is safe to call more than once and from any goroutine: the slow
+// client path and the reader's exit can both reach it for the same client.
 func (h *Hub) unregister(c *Client) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if _, ok := h.clients[c.userID]; ok {
 		delete(h.clients[c.userID], c)
 		if len(h.clients[c.userID]) == 0 {
 			delete(h.clients, c.userID)
 		}
 	}
-	c.conn.Close()
-	close(c.send)
-	h.log.Info("client disconnected", zap.String("user_id", c.userID))
+	h.mu.Unlock()
+
+	c.closeOnce.Do(func() {
+		close(c.done)
+		c.conn.Close()
+		h.log.Info("client disconnected", zap.String("user_id", c.userID))
+	})
 }
 
 func (h *Hub) writePump(c *Client) {
@@ -156,12 +177,12 @@ func (h *Hub) writePump(c *Client) {
 
 	for {
 		select {
-		case msg, ok := <-c.send:
+		case <-c.done:
+			c.conn.SetWriteDeadline(time.Now().Add(time.Second))  //nolint:errcheck
+			c.conn.WriteMessage(websocket.CloseMessage, []byte{}) //nolint:errcheck
+			return
+		case msg := <-c.send:
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{}) //nolint:errcheck
-				return
-			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}

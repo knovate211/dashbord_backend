@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/knovate211/api-gateway/middleware"
+	"github.com/knovate211/pkg/ids"
 	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
@@ -122,8 +123,13 @@ func (h *IntegrityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // liveAttempt confirms the attempt is the caller's and still running.
 func (h *IntegrityHandler) liveAttempt(ctx context.Context, attemptID, userID string) error {
+	// Checked here so the queries below — and those after a successful call —
+	// can compare uuid columns directly and use their indexes.
+	if !ids.IsUUID(attemptID) {
+		return errors.New("attempt not found")
+	}
 	var owner, status string
-	err := h.Pool.QueryRow(ctx, `SELECT user_id::text, status FROM attempts WHERE id::text = $1`, attemptID).Scan(&owner, &status)
+	err := h.Pool.QueryRow(ctx, `SELECT user_id::text, status FROM attempts WHERE id = $1`, attemptID).Scan(&owner, &status)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && owner != userID) {
 		return errors.New("attempt not found")
 	}
@@ -178,7 +184,7 @@ func (h *IntegrityHandler) heartbeat(w http.ResponseWriter, r *http.Request, use
 		_ = h.Pool.QueryRow(ctx, `
 			SELECT COUNT(*) FILTER (WHERE last_seen > now() - interval '90 seconds'),
 			       COALESCE(array_agg(DISTINCT ip) FILTER (WHERE ip <> $3), '{}')
-			FROM   attempt_sessions WHERE attempt_id::text = $1 AND session_id <> $2
+			FROM   attempt_sessions WHERE attempt_id = $1 AND session_id <> $2
 		`, body.AttemptID, session, ip).Scan(&others, &otherIPs)
 		if others > 0 {
 			h.event(ctx, body.AttemptID, userID, "duplicate_session", "test opened in another tab or device")
@@ -233,7 +239,11 @@ func (h *IntegrityHandler) snapshots(w http.ResponseWriter, r *http.Request, use
 		return
 	}
 	var kind string
-	if err := h.Pool.QueryRow(ctx, `SELECT kind FROM attempt_questions WHERE id::text = $1 AND attempt_id::text = $2`,
+	if !ids.IsUUID(body.QuestionID) {
+		h.fail(w, http.StatusNotFound, "question not found")
+		return
+	}
+	if err := h.Pool.QueryRow(ctx, `SELECT kind FROM attempt_questions WHERE id = $1 AND attempt_id = $2`,
 		body.QuestionID, body.AttemptID).Scan(&kind); err != nil || kind != "coding" {
 		h.fail(w, http.StatusNotFound, "question not found")
 		return
@@ -245,8 +255,8 @@ func (h *IntegrityHandler) snapshots(w http.ResponseWriter, r *http.Request, use
 	var prev string
 	var stored int
 	err := h.Pool.QueryRow(ctx, `
-		SELECT COALESCE((SELECT code FROM code_snapshots WHERE attempt_id::text = $1 AND question_id::text = $2 ORDER BY at DESC, id DESC LIMIT 1), ''),
-		       (SELECT COUNT(*) FROM code_snapshots WHERE attempt_id::text = $1 AND question_id::text = $2)
+		SELECT COALESCE((SELECT code FROM code_snapshots WHERE attempt_id = $1 AND question_id = $2 ORDER BY at DESC, id DESC LIMIT 1), ''),
+		       (SELECT COUNT(*) FROM code_snapshots WHERE attempt_id = $1 AND question_id = $2)
 	`, body.AttemptID, body.QuestionID).Scan(&prev, &stored)
 	if err != nil {
 		h.fail(w, http.StatusInternalServerError, "could not store snapshots")

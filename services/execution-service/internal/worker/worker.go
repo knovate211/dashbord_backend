@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -21,6 +23,13 @@ const (
 	subjectRun    = "execution.run"
 	subjectResult = "execution.result"
 	consumerName  = "execution-worker"
+
+	// ackWait is how long NATS waits for an ack before redelivering a job.
+	// keepAliveEvery must stay well under it: every job, waiting or running,
+	// reports progress at that interval so a backlog is never redelivered and
+	// run twice just because it queued behind other submissions.
+	ackWait        = 5 * time.Minute
+	keepAliveEvery = time.Minute
 )
 
 // ProblemClient is the interface the worker uses to fetch test cases.
@@ -35,6 +44,8 @@ type Worker struct {
 	judge   *judge.Judge
 	probCli problemv1.ProblemServiceClient
 	log     *zap.Logger
+	// jobs bounds how many submissions are graded at once.
+	jobs chan struct{}
 }
 
 // New creates and initialises a Worker, setting up the JetStream stream if needed.
@@ -57,15 +68,35 @@ func New(nc *nats.Conn, sb *sandbox.DockerSandbox, j *judge.Judge, probCli probl
 		log.Info("stream already exists or created", zap.Error(err))
 	}
 
-	return &Worker{js: js, sb: sb, judge: j, probCli: probCli, log: log}, nil
+	n := workerConcurrency(sb)
+	log.Info("execution worker configured", zap.Int("concurrent_jobs", n))
+	return &Worker{js: js, sb: sb, judge: j, probCli: probCli, log: log, jobs: make(chan struct{}, n)}, nil
+}
+
+// workerConcurrency is how many submissions are graded in parallel. It defaults
+// to the sandbox's container limit: each job runs its cases one after another,
+// so one job per container slot keeps every slot busy without piling jobs up
+// behind the slot queue, where their time limits would start running out.
+// EXEC_WORKER_CONCURRENCY overrides it.
+func workerConcurrency(sb *sandbox.DockerSandbox) int {
+	if v := os.Getenv("EXEC_WORKER_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return sb.Capacity()
 }
 
 // Start begins consuming from execution.run. Blocks until ctx is cancelled.
 func (w *Worker) Start(ctx context.Context) error {
-	sub, err := w.js.QueueSubscribe(subjectRun, consumerName, w.handleMessage,
+	// The callback only hands the job off. A NATS subscription delivers one
+	// message at a time, so grading inside it would grade one submission at a
+	// time however many container slots are free.
+	sub, err := w.js.QueueSubscribe(subjectRun, consumerName,
+		func(msg *nats.Msg) { go w.dispatch(ctx, msg) },
 		nats.Durable(consumerName),
 		nats.ManualAck(),
-		nats.AckWait(5*time.Minute),
+		nats.AckWait(ackWait),
 		nats.MaxDeliver(3),
 	)
 	if err != nil {
@@ -77,6 +108,43 @@ func (w *Worker) Start(ctx context.Context) error {
 	<-ctx.Done()
 	w.log.Info("execution worker stopping")
 	return nil
+}
+
+// dispatch waits for a free job slot, then grades the job. The job reports
+// progress to NATS the whole time, so neither the wait nor a long run is
+// mistaken for a dead worker.
+func (w *Worker) dispatch(ctx context.Context, msg *nats.Msg) {
+	stop := keepAlive(msg)
+	defer stop()
+
+	select {
+	case w.jobs <- struct{}{}:
+		defer func() { <-w.jobs }()
+	case <-ctx.Done():
+		// Shutting down before it started: hand it straight back so the next
+		// worker picks it up instead of waiting out the ack deadline.
+		msg.Nak() //nolint:errcheck
+		return
+	}
+	w.handleMessage(msg)
+}
+
+// keepAlive tells NATS the job is still being worked on until stop is called.
+func keepAlive(msg *nats.Msg) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(keepAliveEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				msg.InProgress() //nolint:errcheck
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // handleMessage processes a single execution job.

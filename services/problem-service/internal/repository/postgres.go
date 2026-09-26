@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/knovate211/pkg/ids"
 	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
@@ -134,12 +135,17 @@ func (r *ProblemRepository) GetProblem(ctx context.Context, req *problemv1.GetPr
 	p := &problemv1.Problem{}
 	var ioMode string
 
+	// Either key is indexed; compare the uuid column only when the value can
+	// be one, since Postgres errors on a slug cast to uuid.
+	where := "slug = $1"
+	if ids.IsUUID(req.Id) {
+		where = "id = $1::uuid OR slug = $1"
+	}
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, slug, title, difficulty, topic, xp, statement,
 		       COALESCE(set_id::text, '') AS set_id, io_mode, is_private
 		FROM   problems
-		WHERE  id::text = $1 OR slug = $1
-	`, req.Id).Scan(&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode, &p.IsPrivate)
+		WHERE  `+where, req.Id).Scan(&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode, &p.IsPrivate)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("problem not found: %s", req.Id)
@@ -458,15 +464,23 @@ func (r *ProblemRepository) getExecutionSpec(ctx context.Context, problemID stri
 }
 
 // ListPracticeSets returns all practice sets with optional per-user progress.
+//
+// One query: counting each set's solved problems in a second query while the
+// first was still open held two pool connections per call, so enough
+// concurrent callers could take the whole pool and wait on each other forever.
+// With no userId the solved count is simply zero.
 func (r *ProblemRepository) ListPracticeSets(ctx context.Context, req *problemv1.ListPracticeSetsRequest) (*problemv1.ListPracticeSetsResponse, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT ps.id, ps.title, ps.level, ps.level_color, ps.bg_color,
-		       COUNT(p.id) AS total_problems
+		       COUNT(p.id) AS total_problems,
+		       COUNT(pus.problem_id) AS solved
 		FROM   practice_sets ps
 		LEFT   JOIN problems p ON p.set_id = ps.id
+		LEFT   JOIN problem_user_status pus
+		       ON pus.problem_id = p.id AND pus.user_id = $1 AND pus.status = 'Solved'
 		GROUP  BY ps.id
 		ORDER  BY ps.created_at
-	`)
+	`, req.UserId)
 	if err != nil {
 		return nil, fmt.Errorf("list practice sets: %w", err)
 	}
@@ -475,24 +489,17 @@ func (r *ProblemRepository) ListPracticeSets(ctx context.Context, req *problemv1
 	var sets []*problemv1.PracticeSet
 	for rows.Next() {
 		s := &problemv1.PracticeSet{}
-		if err := rows.Scan(&s.Id, &s.Title, &s.Level, &s.LevelColor, &s.BgColor, &s.TotalProblems); err != nil {
+		var solved int32
+		if err := rows.Scan(&s.Id, &s.Title, &s.Level, &s.LevelColor, &s.BgColor, &s.TotalProblems, &solved); err != nil {
 			return nil, fmt.Errorf("scan practice set: %w", err)
 		}
-
-		// Per-user progress if userId provided
-		if req.UserId != "" {
-			var solved int32
-			r.pool.QueryRow(ctx, `
-				SELECT COUNT(*) FROM problem_user_status pus
-				JOIN   problems p ON p.id = pus.problem_id
-				WHERE  pus.user_id = $1 AND p.set_id = $2 AND pus.status = 'Solved'
-			`, req.UserId, s.Id).Scan(&solved) //nolint:errcheck
-
-			if s.TotalProblems > 0 {
-				s.Progress = float32(solved) / float32(s.TotalProblems) * 100
-			}
+		if req.UserId != "" && s.TotalProblems > 0 {
+			s.Progress = float32(solved) / float32(s.TotalProblems) * 100
 		}
 		sets = append(sets, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list practice sets: %w", err)
 	}
 
 	return &problemv1.ListPracticeSetsResponse{PracticeSets: sets}, nil

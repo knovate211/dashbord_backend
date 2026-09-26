@@ -1,3 +1,7 @@
+# Every port except the gateway's 8080 is bound to 127.0.0.1. The prod file is
+# layered on top of this one, and Compose appends port lists rather than
+# replacing them, so a public binding here is public on the EC2 host too —
+# including execution-service, which holds the Docker socket.
 services:
   # ─── Infrastructure ──────────────────────────────────────────────────────────
   postgres:
@@ -8,7 +12,7 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: skillofide
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,7 +29,7 @@ services:
       # Host port 6380, not 6379: another local project (b4igo-redis) holds
       # 6379, and the clash left this whole stack half-started. Containers
       # still reach Redis at redis:6379; only host tools use 6380.
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -37,8 +41,8 @@ services:
     restart: unless-stopped
     command: "--jetstream --http_port 8222 --store_dir /data"
     ports:
-      - "4222:4222"   # client port
-      - "8222:8222"   # monitoring
+      - "127.0.0.1:4222:4222"   # client port
+      - "127.0.0.1:8222:8222"   # monitoring
     volumes:
       - nats_data:/data
     healthcheck:
@@ -57,8 +61,8 @@ services:
     image: axllent/mailpit:latest
     restart: unless-stopped
     ports:
-      - "8025:8025"   # web UI
-      - "1025:1025"   # SMTP
+      - "127.0.0.1:8025:8025"   # web UI
+      - "127.0.0.1:1025:1025"   # SMTP
     environment:
       MP_MAX_MESSAGES: "5000"
       MP_SMTP_AUTH_ACCEPT_ANY: "true"
@@ -95,7 +99,7 @@ services:
       GRPC_PORT: "50051"
       LOG_LEVEL: info
     ports:
-      - "50051:50051"
+      - "127.0.0.1:50051:50051"
     depends_on:
       postgres:
         condition: service_healthy
@@ -124,7 +128,7 @@ services:
       GRPC_PORT: "50052"
       LOG_LEVEL: info
     ports:
-      - "50052:50052"
+      - "127.0.0.1:50052:50052"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Docker-in-Docker for sandbox
     depends_on:
@@ -145,7 +149,7 @@ services:
       GRPC_PORT: "50053"
       LOG_LEVEL: info
     ports:
-      - "50053:50053"
+      - "127.0.0.1:50053:50053"
     depends_on:
       postgres:
         condition: service_healthy
@@ -165,7 +169,7 @@ services:
       GRPC_PORT: "50054"
       LOG_LEVEL: info
     ports:
-      - "50054:50054"
+      - "127.0.0.1:50054:50054"
     depends_on:
       postgres:
         condition: service_healthy
@@ -184,7 +188,7 @@ services:
       HTTP_PORT: "8081"
       LOG_LEVEL: info
     ports:
-      - "8085:8081"
+      - "127.0.0.1:8085:8081"
     depends_on:
       nats:
         condition: service_healthy
@@ -199,7 +203,7 @@ services:
       GRPC_PORT: "50055"
       LOG_LEVEL: info
     ports:
-      - "50055:50055"
+      - "127.0.0.1:50055:50055"
     depends_on:
       postgres:
         condition: service_healthy
@@ -218,7 +222,7 @@ services:
       SWEEP_INTERVAL_SECONDS: "30"
       LOG_LEVEL: info
     ports:
-      - "50056:50056"
+      - "127.0.0.1:50056:50056"
     depends_on:
       postgres:
         condition: service_healthy

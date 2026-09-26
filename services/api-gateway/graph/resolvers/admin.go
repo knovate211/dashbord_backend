@@ -30,6 +30,11 @@ type AdminHandler struct {
 	Scholarships *ScholarshipHandler
 	// Attendance serves live-class schedules and rosters; nil disables those routes.
 	Attendance *AttendanceHandler
+	// Certifications serves the exam setup and registration screens; nil
+	// disables those routes.
+	Certifications *CertificationHandler
+	// Referrals serves the referral programme screens; nil disables those routes.
+	Referrals *ReferralHandler
 	// Mailer sends a new account its login details; nil sends nothing (the
 	// account is still created and its password still returned to the admin).
 	Mailer *userMailer
@@ -131,6 +136,74 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// POST /api/admin/scholarship-programs — create or repoint a programme
 	case path == "/scholarship-programs" && r.Method == http.MethodPost && h.Scholarships != nil:
 		h.Scholarships.UpsertProgram(w, r)
+
+	// ─── Referral programme ────────────────────────────────────────────────
+	// GET|POST /api/admin/referral-program — the offer's settings
+	case path == "/referral-program" && r.Method == http.MethodGet && h.Referrals != nil:
+		h.Referrals.GetProgram(w, r)
+	case path == "/referral-program" && r.Method == http.MethodPost && h.Referrals != nil:
+		h.Referrals.UpdateProgram(w, r)
+
+	// GET /api/admin/referrers — who is referring
+	case path == "/referrers" && r.Method == http.MethodGet && h.Referrals != nil:
+		h.Referrals.ListReferrers(w, r)
+
+	// PATCH /api/admin/referrers/{id} — payout details, notes, block
+	case strings.HasPrefix(path, "/referrers/") && r.Method == http.MethodPatch && h.Referrals != nil:
+		h.Referrals.UpdateReferrer(w, r, strings.TrimPrefix(path, "/referrers/"))
+
+	// GET /api/admin/referrals/export.csv — the payout sheet
+	case path == "/referrals/export.csv" && r.Method == http.MethodGet && h.Referrals != nil:
+		h.Referrals.ExportConversions(w, r)
+
+	// POST /api/admin/referrals/bulk — approve or pay a whole run
+	case path == "/referrals/bulk" && r.Method == http.MethodPost && h.Referrals != nil:
+		h.Referrals.BulkUpdate(w, r)
+
+	// GET /api/admin/referrals — rewards owed
+	case path == "/referrals" && r.Method == http.MethodGet && h.Referrals != nil:
+		h.Referrals.ListConversions(w, r)
+
+	// PATCH /api/admin/referrals/{id} — approve, reject, pay
+	case strings.HasPrefix(path, "/referrals/") && r.Method == http.MethodPatch && h.Referrals != nil:
+		h.Referrals.UpdateConversion(w, r, strings.TrimPrefix(path, "/referrals/"))
+
+	// ─── Certification exams ───────────────────────────────────────────────
+	// GET /api/admin/certification-exams — what is on offer
+	case path == "/certification-exams" && r.Method == http.MethodGet && h.Certifications != nil:
+		h.Certifications.ListExams(w, r)
+
+	// POST /api/admin/certification-exams — create or repoint an exam
+	case path == "/certification-exams" && r.Method == http.MethodPost && h.Certifications != nil:
+		h.Certifications.UpsertExam(w, r)
+
+	// DELETE /api/admin/certification-exams/{id}
+	case strings.HasPrefix(path, "/certification-exams/") && r.Method == http.MethodDelete && h.Certifications != nil:
+		h.Certifications.DeleteExam(w, r, strings.TrimPrefix(path, "/certification-exams/"))
+
+	// GET /api/admin/certifications/export.csv — same filters as the table
+	case path == "/certifications/export.csv" && r.Method == http.MethodGet && h.Certifications != nil:
+		h.Certifications.ExportRegistrations(w, r)
+
+	// GET /api/admin/certifications — registrations, with live attempt state
+	case path == "/certifications" && r.Method == http.MethodGet && h.Certifications != nil:
+		h.Certifications.ListRegistrations(w, r)
+
+	// POST /api/admin/certifications/{id}/resend — rotate and re-send the link
+	case strings.HasPrefix(path, "/certifications/") && strings.HasSuffix(path, "/resend") &&
+		r.Method == http.MethodPost && h.Certifications != nil:
+		inner := strings.TrimPrefix(path, "/certifications/")
+		h.Certifications.ResendLink(w, r, strings.TrimSuffix(inner, "/resend"))
+
+	// POST /api/admin/certifications/{id}/extend — same link, more time
+	case strings.HasPrefix(path, "/certifications/") && strings.HasSuffix(path, "/extend") &&
+		r.Method == http.MethodPost && h.Certifications != nil:
+		inner := strings.TrimPrefix(path, "/certifications/")
+		h.Certifications.ExtendLink(w, r, strings.TrimSuffix(inner, "/extend"))
+
+	// PATCH /api/admin/certifications/{id} — notes, refund, issue or revoke
+	case strings.HasPrefix(path, "/certifications/") && r.Method == http.MethodPatch && h.Certifications != nil:
+		h.Certifications.UpdateRegistration(w, r, strings.TrimPrefix(path, "/certifications/"))
 
 	// GET /api/admin/classes — live-class schedules
 	case path == "/classes" && r.Method == http.MethodGet && h.Attendance != nil:

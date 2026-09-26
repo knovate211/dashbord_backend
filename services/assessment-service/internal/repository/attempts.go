@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/knovate211/assessment-service/internal/grading"
+	"github.com/knovate211/pkg/ids"
 	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
@@ -118,7 +119,7 @@ func (r *Repo) ListAvailableAssessments(ctx context.Context, req *assessmentv1.L
 		  AND  (a.purpose <> 'practice' OR cardinality(a.course_ids) = 0
 		        OR EXISTS (SELECT 1 FROM user_courses uc
 		                   WHERE uc.user_id = $1 AND uc.course_id = ANY(a.course_ids)))
-		ORDER  BY (a.purpose IN ('hiring', 'scholarship')) DESC, a.created_at DESC
+		ORDER  BY (a.purpose IN ('hiring', 'scholarship', 'certification')) DESC, a.created_at DESC
 	`, req.UserId, email)
 	if err != nil {
 		return nil, fmt.Errorf("list available assessments: %w", err)
@@ -362,6 +363,10 @@ func initialGradingStatus(kind string) string {
 // behaviour practice relies on), not silently stop showing them.
 func resultsWithheld(purpose string) bool {
 	p := strings.ToLower(strings.TrimSpace(purpose))
+	// Certification is deliberately absent: a candidate who paid to sit an exam
+	// is told whether they passed and what they scored. The question-by-question
+	// breakdown is still governed by the paper's reveal_results flag, so the
+	// bank stays protected.
 	return p == "scholarship" || p == "hiring"
 }
 
@@ -372,10 +377,12 @@ func (r *Repo) practiceAudienceOK(ctx context.Context, a *assessmentv1.Assessmen
 		return nil
 	}
 	var ok bool
-	if err := r.pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM user_courses WHERE user_id::text = $1 AND course_id = ANY($2))
-	`, userID, *a.CourseIds).Scan(&ok); err != nil {
-		return fmt.Errorf("check course enrolment: %w", err)
+	if ids.IsUUID(userID) {
+		if err := r.pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = ANY($2))
+		`, userID, *a.CourseIds).Scan(&ok); err != nil {
+			return fmt.Errorf("check course enrolment: %w", err)
+		}
 	}
 	if !ok {
 		return fmt.Errorf("this test is only open to students of its course")
@@ -898,17 +905,20 @@ func (r *Repo) SaveAnswer(ctx context.Context, req *assessmentv1.SaveAnswerReque
 	// the judge — but it does mean a candidate who navigates away, refreshes or
 	// crashes keeps the code they had written.
 	if kind == "coding" {
-		if _, err := r.pool.Exec(ctx, `
+		tag, err := r.pool.Exec(ctx, `
 			UPDATE attempt_questions SET
 				language      = COALESCE(NULLIF($3, ''), language),
 				code          = $4,
 				marked_review = $5,
 				visited       = true,
 				time_spent_ms = time_spent_ms + GREATEST($6, 0)
-			WHERE id = $1 AND attempt_id = $2
-		`, req.QuestionId, req.AttemptId, req.Language, req.Code,
-			req.MarkedReview, req.TimeSpentMs); err != nil {
+			WHERE id = $1 AND attempt_id = $2 AND `+stillLive, req.QuestionId, req.AttemptId, req.Language, req.Code,
+			req.MarkedReview, req.TimeSpentMs)
+		if err != nil {
 			return 0, fmt.Errorf("save coding draft: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return 0, ErrAttemptClosed
 		}
 		return a.secondsLeft(time.Now().UTC()), nil
 	}
@@ -934,21 +944,34 @@ func (r *Repo) SaveAnswer(ctx context.Context, req *assessmentv1.SaveAnswerReque
 		selected = []string{}
 	}
 
-	_, err = r.pool.Exec(ctx, `
+	tag, err := r.pool.Exec(ctx, `
 		UPDATE attempt_questions SET
 			selected_options = $3::uuid[],
 			text_answer      = CASE WHEN $4 THEN NULL ELSE $5 END,
 			marked_review    = $6,
 			visited          = true,
 			time_spent_ms    = time_spent_ms + GREATEST($7, 0)
-		WHERE id = $1 AND attempt_id = $2
-	`, req.QuestionId, req.AttemptId, selected, req.ClearAnswer, req.TextAnswer,
+		WHERE id = $1 AND attempt_id = $2 AND `+stillLive, req.QuestionId, req.AttemptId, selected, req.ClearAnswer, req.TextAnswer,
 		req.MarkedReview, req.TimeSpentMs)
 	if err != nil {
 		return 0, fmt.Errorf("save answer: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return 0, ErrAttemptClosed
+	}
 	return a.secondsLeft(time.Now().UTC()), nil
 }
+
+// stillLive is appended to every write that changes an answer. The liveness
+// check in requireLiveAttempt runs before the write, so without this a save
+// arriving while FinalizeAttempt is grading would land after the marks were
+// counted and never be scored — likeliest in a test's last seconds, when every
+// candidate's autosave and the deadline sweep coincide.
+//
+// FOR SHARE conflicts with the FOR UPDATE lock FinalizeAttempt takes on the
+// attempt: a save either commits first and is graded, or waits, sees the
+// attempt closed, and changes nothing. Parameter $2 must be the attempt id.
+const stillLive = `EXISTS (SELECT 1 FROM attempts WHERE id = $2 AND status = 'in_progress' FOR SHARE)`
 
 // requireEarlierAnswered enforces a lock_forward paper's rule: every question
 // before orderIndex must already be answered.
@@ -1046,13 +1069,16 @@ func (r *Repo) RecordCodeSubmission(ctx context.Context, attemptID, questionID, 
 		return 0, fmt.Errorf("insert attempt submission: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE attempt_questions
 		SET    submission_id = $3, language = $4, code = $5,
 		       grading_status = 'pending', visited = true
-		WHERE  id = $1 AND attempt_id = $2
-	`, questionID, attemptID, submissionID, language, code); err != nil {
+		WHERE  id = $1 AND attempt_id = $2 AND `+stillLive, questionID, attemptID, submissionID, language, code)
+	if err != nil {
 		return 0, fmt.Errorf("mark question pending: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, ErrAttemptClosed
 	}
 
 	if err := tx.Commit(ctx); err != nil {

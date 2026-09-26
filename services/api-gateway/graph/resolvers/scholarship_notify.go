@@ -36,6 +36,11 @@ type scholarshipMailer struct {
 	log   *zap.Logger
 }
 
+// NewScholarshipMailer exposes the shared applicant mailer to the gateway, so
+// the certification funnel sends through the same SMTP configuration and the
+// same "log the link when SMTP is unset" degradation.
+func NewScholarshipMailer(log *zap.Logger) *scholarshipMailer { return newScholarshipMailer(log) }
+
 func newScholarshipMailer(log *zap.Logger) *scholarshipMailer {
 	staff := []string{}
 	// Falls back to the enquiry list so a deployment that already alerts on
