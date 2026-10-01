@@ -275,7 +275,7 @@ type certRegistrationRow struct {
 
 const certRegistrationQuery = `
 	SELECT reg.id::text, e.title, e.slug, reg.name, reg.email, reg.phone, reg.status,
-	       reg.amount_paise, COALESCE(reg.razorpay_payment_id, ''),
+	       reg.amount_paise, COALESCE(reg.gateway_payment_id, ''),
 	       reg.created_at, reg.paid_at, reg.claim_expires_at, reg.claimed_at,
 	       reg.emailed_at IS NOT NULL,
 	       COALESCE(at.id::text, ''), COALESCE(at.status, ''),
@@ -468,7 +468,7 @@ func (h *CertificationHandler) UpdateRegistration(w http.ResponseWriter, r *http
 		// notes-only update
 
 	case "refund":
-		// Records the decision; the money is moved in the Razorpay dashboard.
+		// Records the decision; the money is moved in the Cashfree dashboard.
 		// The invite is withdrawn so a refunded candidate cannot still sit the
 		// exam on the link they already hold.
 		tag, err := h.Pool.Exec(ctx, `

@@ -12,7 +12,12 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: skillofide
     ports:
-      - "127.0.0.1:5432:5432"
+      # Host port 5435, not 5432: a Postgres installed on the Mac itself holds
+      # 127.0.0.1:5432, and the clash stops this container — and every
+      # service that waits on it — from starting. Containers still reach it at
+      # postgres:5432; only host tools (psql, GUI clients) use 5435 (5433 is taken
+      # on this Mac too, 5434 by b4igo-postgres).
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5435}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -274,14 +279,22 @@ services:
       # Staff alerts for new scholarship applications. Falls back to
       # INQUIRY_NOTIFY_TO when unset.
       SCHOLARSHIP_NOTIFY_TO: ${SCHOLARSHIP_NOTIFY_TO:-admissions@knovate.local}
-      # Online course purchase (Razorpay). Leave the keys empty to keep online
-      # payment off — the site then offers "request a callback" instead. Use
-      # rzp_test_ keys until the flow is checked end to end. The webhook
-      # secret is the one set on the Razorpay dashboard webhook for
-      # <api>/api/enroll/webhook (events: payment.captured, order.paid).
-      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
-      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
-      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      # Online payment (Cashfree) for course enrolment and certification
+      # exams. Leave the keys empty to keep online payment off — the site then
+      # offers "request a callback" instead. CASHFREE_ENV is sandbox unless set
+      # to production; sandbox keys only work against sandbox. Webhooks are
+      # signed with the secret key, so there is no separate webhook secret.
+      # PAYMENT_WEBHOOK_BASE is this gateway's public https origin; when set,
+      # every order carries its own webhook URL (otherwise add one on the
+      # Cashfree dashboard pointing at <api>/api/enroll/webhook).
+      CASHFREE_APP_ID: ${CASHFREE_APP_ID:-}
+      CASHFREE_SECRET_KEY: ${CASHFREE_SECRET_KEY:-}
+      CASHFREE_ENV: ${CASHFREE_ENV:-sandbox}
+      PAYMENT_WEBHOOK_BASE: ${PAYMENT_WEBHOOK_BASE:-}
+      # Testing only: point the gateway at a stand-in for Cashfree's API.
+      # Empty means the real endpoint for CASHFREE_ENV.
+      CASHFREE_API_BASE: ${CASHFREE_API_BASE:-}
+      SITE_BASE_URL: ${SITE_BASE_URL:-http://localhost:3000}
       # Rate limits on the public forms. Per-IP limits are OFF (0) by default:
       # a whole campus shares one NAT address, and an IP cap blocks real
       # students on drive day. Abuse is stopped per email instead (and by the

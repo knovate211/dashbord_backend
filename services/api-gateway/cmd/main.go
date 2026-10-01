@@ -247,7 +247,7 @@ func main() {
 			log.Info("referral programme registered at /api/referral/")
 		}
 
-		// Online course purchase through Razorpay. config/order/verify/webhook
+		// Online course purchase through Cashfree. config/order/verify/webhook
 		// are public (listed in publicPaths below) — the buyer may not have an
 		// account yet; paying is what creates it. The order list lives under
 		// /api/admin/ behind the role guard.

@@ -2,7 +2,7 @@
 
 Right now the api-gateway is the front door. It publishes `8080:8080` straight
 to the host, speaks plain HTTP, and nothing sits between it and a client. On the
-way out, it calls Razorpay, RapidAPI (JSearch) and an SMTP server directly, and
+way out, it calls Cashfree, RapidAPI (JSearch) and an SMTP server directly, and
 nothing limits where else it could call.
 
 This plan adds two proxies:
@@ -34,7 +34,7 @@ proxy.
                         the only public port
 
                           OUTBOUND
-  api-gateway ──HTTPS_PROXY──► Squid ──► api.razorpay.com
+  api-gateway ──HTTPS_PROXY──► Squid ──► api.cashfree.com
                                   │  ──► jsearch.p.rapidapi.com
                                   │   ✗  anything else: denied and logged
   api-gateway ──SMTP─────────► mailpit (local) / mail provider (prod)
@@ -60,7 +60,7 @@ other, Postgres, Redis and NATS.
 
 | Destination | Protocol | Code |
 |---|---|---|
-| `api.razorpay.com` | HTTPS | `graph/resolvers/enroll.go`, `certification.go` |
+| `api.cashfree.com` | HTTPS | `graph/resolvers/enroll.go`, `certification.go` |
 | `jsearch.p.rapidapi.com` | HTTPS | `graph/resolvers/job.resolvers.go` |
 | SMTP (`SMTP_HOST:SMTP_PORT`) | raw TCP | `*_notify.go` via `net/smtp` |
 
@@ -229,7 +229,7 @@ origin, not the API's.
 http_port 3128
 
 # Hosts the gateway may reach. Add new integrations here, deliberately.
-acl allowed_hosts dstdomain api.razorpay.com
+acl allowed_hosts dstdomain api.cashfree.com sandbox.cashfree.com
 acl allowed_hosts dstdomain jsearch.p.rapidapi.com
 
 acl SSL_ports port 443
@@ -272,7 +272,7 @@ Add `squid` to the gateway's `depends_on`.
   the internal services tries to tunnel through Squid, and Squid refuses because
   ports 5005x aren't in `SSL_ports`. The gateway then fails at startup or on the
   first request.
-- **HTTP clients:** no Go code changes are needed. The Razorpay and JSearch
+- **HTTP clients:** no Go code changes are needed. The Cashfree and JSearch
   clients are `&http.Client{Timeout: ...}` with no custom `Transport`, so they
   use `http.DefaultTransport`, which already honours `HTTPS_PROXY`.
 - **Keep it that way:** if anyone later sets a custom `Transport`, it must
@@ -291,8 +291,8 @@ Phase 5.
   right.
 - The jobs search (JSearch) returns results, and Squid's log shows
   `CONNECT jsearch.p.rapidapi.com:443 ... TCP_TUNNEL/200`.
-- A Razorpay order is created (test keys), and Squid logs the CONNECT to
-  `api.razorpay.com`.
+- A Cashfree order is created (sandbox keys; sandbox.cashfree.com must also be allowed), and Squid logs the CONNECT to
+  `api.cashfree.com`.
 - A blocked host is refused:
 
   ```bash
@@ -351,7 +351,7 @@ services:
 - From inside the gateway, a direct call with the proxy unset fails:
 
   ```bash
-  docker compose exec -e HTTPS_PROXY= api-gateway wget -qO- https://api.razorpay.com
+  docker compose exec -e HTTPS_PROXY= api-gateway wget -qO- https://api.cashfree.com
   ```
 
 ---
@@ -395,7 +395,7 @@ differences:
       behind the flag, with tests
 - [ ] Phase 2: Caddy on `https://localhost:8443`; health, login, `/ws` and
       body limit verified
-- [ ] Phase 3: Squid allowlist; JSearch and Razorpay pass, `example.com`
+- [ ] Phase 3: Squid allowlist; JSearch and Cashfree pass, `example.com`
       blocked, gRPC unaffected
 - [ ] Phase 4: prod override isolates networks; `:8080` closed, direct egress
       fails

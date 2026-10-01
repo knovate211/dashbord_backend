@@ -24,8 +24,7 @@ func certHandler() *CertificationHandler {
 		jwtSecret:    "test-secret",
 		appBase:      "http://portal.test",
 		siteBase:     "http://site.test",
-		keyID:        "rzp_test_key",
-		keySecret:    "rzp_test_secret",
+		pay:          &cashfree{appID: "TEST_APP", secret: "test_secret", env: "sandbox"},
 		Mailer:       &scholarshipMailer{log: zap.NewNop()},
 		ipLimiter:    newRateLimiter(1000, time.Minute),
 		emailLimiter: newRateLimiter(1000, time.Minute),
@@ -75,10 +74,10 @@ func TestOrderRejectsBeforeTouchingTheDatabase(t *testing.T) {
 
 func TestOrderRefusedWhenPaymentsAreOff(t *testing.T) {
 	h := certHandler()
-	h.keyID, h.keySecret = "", ""
+	h.pay = &cashfree{}
 	rec := postCert(t, h, "/api/certification/order", `{"name":"A","email":"a@b.com","slug":"java"}`)
 	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 — an exam must never look purchasable when Razorpay is unconfigured", rec.Code)
+		t.Fatalf("status = %d, want 503 — an exam must never look purchasable when Cashfree is unconfigured", rec.Code)
 	}
 }
 
@@ -92,20 +91,35 @@ func TestClaimRejectsBeforeTouchingTheDatabase(t *testing.T) {
 	}
 }
 
-func TestVerifyRejectsAForgedSignature(t *testing.T) {
+func TestVerifyRefusesAnOrderThatIsNotAnExam(t *testing.T) {
 	h := certHandler()
-	rec := postCert(t, h, "/api/certification/verify",
-		`{"razorpay_order_id":"order_1","razorpay_payment_id":"pay_1","razorpay_signature":"deadbeef"}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 — an unsigned payment must never reach fulfilment", rec.Code)
+	for _, body := range []string{`{}`, `{"order_id":""}`, `{"order_id":"enr_x"}`, `{`} {
+		rec := postCert(t, h, "/api/certification/verify", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %q: status = %d, want 400 — only an exam order may reach the gateway lookup", body, rec.Code)
+		}
 	}
 }
 
-func TestWebhookIsInvisibleWithoutItsSecret(t *testing.T) {
-	h := certHandler() // webhookSecret empty
-	rec := postCert(t, h, "/api/certification/webhook", `{"event":"payment.captured"}`)
+func TestWebhookRejectsAForgedSignature(t *testing.T) {
+	h := certHandler()
+	req := httptest.NewRequest(http.MethodPost, "/api/certification/webhook",
+		strings.NewReader(`{"type":"PAYMENT_SUCCESS_WEBHOOK","data":{"order":{"order_id":"cert_1"}}}`))
+	req.Header.Set("x-webhook-timestamp", "1700000000000")
+	req.Header.Set("x-webhook-signature", "Zm9yZ2Vk")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 — an unsigned payment notice must never reach fulfilment", rec.Code)
+	}
+}
+
+func TestWebhookIsInvisibleWhenPaymentsAreOff(t *testing.T) {
+	h := certHandler()
+	h.pay = &cashfree{}
+	rec := postCert(t, h, "/api/certification/webhook", `{"type":"PAYMENT_SUCCESS_WEBHOOK"}`)
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 — an unconfigured webhook must not accept unverified payloads", rec.Code)
+		t.Fatalf("status = %d, want 404 — an unconfigured webhook must not accept payloads", rec.Code)
 	}
 }
 

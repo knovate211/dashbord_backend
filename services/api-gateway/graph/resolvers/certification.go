@@ -23,9 +23,9 @@ import (
 // CertificationHandler sells and runs paid certification exams.
 //
 //	GET  /api/certification/config              — exams currently on sale
-//	POST /api/certification/order               — register + create a Razorpay order
+//	POST /api/certification/order               — register + create a Cashfree order
 //	POST /api/certification/verify              — browser callback after checkout
-//	POST /api/certification/webhook             — Razorpay server-to-server confirmation
+//	POST /api/certification/webhook             — Cashfree server-to-server confirmation
 //	POST /api/certification/claim               — exchange the emailed link for a session
 //	GET  /api/certification/outcome?attemptId=  — pass/fail once grading settles
 //	GET  /api/certification/mine                — the signed-in learner's certificates
@@ -58,11 +58,9 @@ type CertificationHandler struct {
 	appBase   string // where a candidate sits the exam
 	siteBase  string // where a credential is verified
 
-	keyID, keySecret, webhookSecret string
-	apiBase                         string
-	client                          *http.Client
-	ipLimiter                       *rateLimiter
-	emailLimiter                    *rateLimiter
+	pay          *cashfree
+	ipLimiter    *rateLimiter
+	emailLimiter *rateLimiter
 }
 
 // Registration statuses that mean the exam is over for this payment. A second
@@ -75,17 +73,13 @@ func NewCertificationHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.L
 	jwtSecret, appBase, siteBase string, mailer *scholarshipMailer) (*CertificationHandler, error) {
 
 	h := &CertificationHandler{
-		Pool:          pool,
-		Log:           log,
-		Mailer:        mailer,
-		jwtSecret:     jwtSecret,
-		appBase:       strings.TrimRight(appBase, "/"),
-		siteBase:      strings.TrimRight(siteBase, "/"),
-		keyID:         strings.TrimSpace(envOr("RAZORPAY_KEY_ID", "")),
-		keySecret:     strings.TrimSpace(envOr("RAZORPAY_KEY_SECRET", "")),
-		webhookSecret: strings.TrimSpace(envOr("RAZORPAY_WEBHOOK_SECRET", "")),
-		apiBase:       strings.TrimRight(envOr("RAZORPAY_API_BASE", "https://api.razorpay.com"), "/"),
-		client:        &http.Client{Timeout: 15 * time.Second},
+		Pool:      pool,
+		Log:       log,
+		Mailer:    mailer,
+		jwtSecret: jwtSecret,
+		appBase:   strings.TrimRight(appBase, "/"),
+		siteBase:  strings.TrimRight(siteBase, "/"),
+		pay:       newCashfreeFromEnv(),
 		// Same reasoning as enrolment: per-IP off by default so one college
 		// network cannot lock itself out, per-email tight enough to stop one
 		// person hammering checkout.
@@ -96,15 +90,15 @@ func NewCertificationHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.L
 		return nil, err
 	}
 	if !h.paymentsEnabled() {
-		log.Warn("certification exams cannot be sold (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET unset)")
+		log.Warn("certification exams cannot be sold (CASHFREE_APP_ID / CASHFREE_SECRET_KEY unset)")
 	}
-	if h.paymentsEnabled() && h.webhookSecret == "" {
-		log.Warn("RAZORPAY_WEBHOOK_SECRET unset — a candidate who closes the tab after paying gets no exam link until staff retry it")
+	if h.paymentsEnabled() && h.pay.notifyURL("/") == "" {
+		log.Warn("PAYMENT_WEBHOOK_BASE unset — without a webhook on the Cashfree dashboard, a candidate who closes the tab after paying gets no exam link until staff retry it")
 	}
 	return h, nil
 }
 
-func (h *CertificationHandler) paymentsEnabled() bool { return h.keyID != "" && h.keySecret != "" }
+func (h *CertificationHandler) paymentsEnabled() bool { return h.pay.enabled() }
 
 func (h *CertificationHandler) ensureTables(ctx context.Context) error {
 	_, err := h.Pool.Exec(ctx, `
@@ -170,6 +164,15 @@ func (h *CertificationHandler) ensureTables(ctx context.Context) error {
 		ALTER TABLE certification_registrations ADD COLUMN IF NOT EXISTS referral_code TEXT NOT NULL DEFAULT '';
 		ALTER TABLE certification_registrations ADD COLUMN IF NOT EXISTS referral_discount_paise BIGINT NOT NULL DEFAULT 0;
 		ALTER TABLE certification_registrations ADD COLUMN IF NOT EXISTS referral_flags TEXT NOT NULL DEFAULT '';
+		-- Gateway-neutral payment references; see enrollment_orders for why the
+		-- razorpay_* columns stay.
+		ALTER TABLE certification_registrations ADD COLUMN IF NOT EXISTS payment_gateway TEXT NOT NULL DEFAULT 'razorpay';
+		ALTER TABLE certification_registrations ADD COLUMN IF NOT EXISTS gateway_order_id TEXT;
+		ALTER TABLE certification_registrations ADD COLUMN IF NOT EXISTS gateway_payment_id TEXT;
+		UPDATE certification_registrations
+		   SET gateway_order_id = razorpay_order_id, gateway_payment_id = razorpay_payment_id
+		 WHERE gateway_order_id IS NULL AND razorpay_order_id IS NOT NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_cert_reg_gateway_order ON certification_registrations(gateway_order_id);
 
 		CREATE TABLE IF NOT EXISTS certificates (
 			id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -297,7 +300,7 @@ func (h *CertificationHandler) handleConfig(w http.ResponseWriter, r *http.Reque
 
 // ─── POST /api/certification/order ────────────────────────────────────────────
 
-// handleOrder registers a candidate and opens a Razorpay order. Nothing is
+// handleOrder registers a candidate and opens a Cashfree order. Nothing is
 // granted here: the row exists so a payment can be matched back to a person,
 // and eligibility is written only once the payment verifies.
 func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +342,11 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 	}
 	if a, err := mail.ParseAddress(email); err != nil || a.Address != email {
 		h.fail(w, http.StatusBadRequest, "please enter a valid email address — your exam link is sent there")
+		return
+	}
+	mobile, ok := cashfreePhone(phone)
+	if !ok {
+		h.fail(w, http.StatusBadRequest, "please enter a valid 10-digit mobile number (it starts with 6, 7, 8 or 9) — the payment page needs it")
 		return
 	}
 	if !h.emailLimiter.allow(email) {
@@ -432,66 +440,78 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	rzpOrderID, err := h.createRazorpayOrder(ctx, amountPaise, regID, map[string]string{
-		"kind": "certification", "exam": req.Slug, "email": email,
+	gatewayOrderID := "cert_" + regID
+	if _, err := h.Pool.Exec(ctx, `
+		UPDATE certification_registrations SET payment_gateway = 'cashfree', gateway_order_id = $2, updated_at = now()
+		WHERE id = $1::uuid
+	`, regID, gatewayOrderID); err != nil {
+		h.Log.Error("store certification order id failed", zap.Error(err))
+		h.fail(w, http.StatusInternalServerError, "could not start your registration, please try again")
+		return
+	}
+	sessionID, err := h.pay.createOrder(ctx, cashfreeOrderReq{
+		OrderID:     gatewayOrderID,
+		AmountPaise: amountPaise,
+		Customer:    cashfreeCustomer{Name: name, Email: email, Phone: mobile},
+		Note:        title + " — certification exam",
+		Tags:        map[string]string{"kind": "certification", "exam": clip(req.Slug, 80)},
+		ReturnURL:   h.siteBase + "/certifications/" + clip(req.Slug, 80) + "?cf_order=" + gatewayOrderID,
+		NotifyURL:   h.pay.notifyURL("/api/certification/webhook"),
 	})
 	if err != nil {
-		h.Log.Error("create certification razorpay order failed", zap.Error(err))
+		h.Log.Error("create certification cashfree order failed", zap.Error(err))
 		_, _ = h.Pool.Exec(ctx, `UPDATE certification_registrations SET error = $2, updated_at = now() WHERE id = $1::uuid`,
 			regID, clip(err.Error(), 500))
 		h.fail(w, http.StatusBadGateway, "the payment gateway did not respond — please try again in a minute")
 		return
 	}
-	if _, err := h.Pool.Exec(ctx, `
-		UPDATE certification_registrations SET razorpay_order_id = $2, updated_at = now() WHERE id = $1::uuid
-	`, regID, rzpOrderID); err != nil {
-		h.Log.Error("store certification order id failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start your registration, please try again")
-		return
-	}
 
 	h.write(w, http.StatusOK, map[string]any{
-		"key_id":            h.keyID,
-		"order_id":          rzpOrderID,
-		"amount":            amountPaise,
-		"currency":          "INR",
-		"exam_name":         title,
-		"list_amount":       pricePaise,
-		"referral_discount": quote.DiscountPaise,
-		"referral_code":     quote.Code,
-		"prefill":           map[string]string{"name": name, "email": email, "contact": phone},
+		"order_id":           gatewayOrderID,
+		"payment_session_id": sessionID,
+		"mode":               h.pay.modeName(),
+		"amount":             amountPaise,
+		"currency":           "INR",
+		"exam_name":          title,
+		"list_amount":        pricePaise,
+		"referral_discount":  quote.DiscountPaise,
+		"referral_code":      quote.Code,
 	})
-}
-
-// createRazorpayOrder mirrors the enrolment handler's call; kept separate so a
-// change to exam receipts cannot alter course checkout.
-func (h *CertificationHandler) createRazorpayOrder(ctx context.Context, amountPaise int64, receipt string, notes map[string]string) (string, error) {
-	e := &EnrollHandler{keyID: h.keyID, keySecret: h.keySecret, apiBase: h.apiBase, client: h.client}
-	return e.createRazorpayOrder(ctx, amountPaise, receipt, notes)
 }
 
 // ─── POST /api/certification/verify and /webhook ──────────────────────────────
 
+// handleVerify is the browser's "checkout finished". Whether the candidate
+// paid is asked of Cashfree, never taken from the request.
 func (h *CertificationHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if !h.paymentsEnabled() {
 		h.fail(w, http.StatusServiceUnavailable, "exam registration is not available")
 		return
 	}
 	var req struct {
-		OrderID   string `json:"razorpay_order_id"`
-		PaymentID string `json:"razorpay_payment_id"`
-		Signature string `json:"razorpay_signature"`
+		OrderID string `json:"order_id"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil || req.OrderID == "" || req.PaymentID == "" {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil || !strings.HasPrefix(req.OrderID, "cert_") {
 		h.fail(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	if !validPaymentSignature(req.OrderID, req.PaymentID, req.Signature, h.keySecret) {
-		h.Log.Warn("certification payment signature mismatch", zap.String("order", req.OrderID))
-		h.fail(w, http.StatusBadRequest, "the payment could not be verified — if money was deducted, contact us with your payment id")
+	ctx := r.Context()
+	paymentID, paidPaise, err := h.pay.paidOrder(ctx, req.OrderID)
+	if errors.Is(err, errNotPaid) {
+		h.fail(w, http.StatusPaymentRequired, "the payment was not completed — no money was taken. Please try again")
 		return
 	}
-	res, err := h.fulfil(r.Context(), req.OrderID, req.PaymentID)
+	if err != nil {
+		h.Log.Error("cashfree order lookup failed", zap.String("order", req.OrderID), zap.Error(err))
+		h.fail(w, http.StatusBadGateway, "we could not confirm your payment with the gateway yet — if money was deducted, your exam link will follow within a few minutes")
+		return
+	}
+	if err := h.checkAmount(ctx, req.OrderID, paidPaise); err != nil {
+		h.Log.Error("certification amount mismatch", zap.String("order", req.OrderID), zap.Error(err))
+		h.fail(w, http.StatusBadRequest, "the payment could not be matched to your registration — contact us with order id "+req.OrderID)
+		return
+	}
+	res, err := h.fulfil(ctx, req.OrderID, paymentID)
 	if err != nil {
 		h.Log.Error("certification fulfilment failed", zap.String("order", req.OrderID), zap.Error(err))
 		h.fail(w, http.StatusInternalServerError,
@@ -502,55 +522,62 @@ func (h *CertificationHandler) handleVerify(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *CertificationHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	if h.webhookSecret == "" {
+	if !h.paymentsEnabled() {
 		h.fail(w, http.StatusNotFound, "not found")
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
+	ev, err := h.pay.parseWebhook(r)
 	if err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid body")
+		h.fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !validWebhookSignature(raw, r.Header.Get("X-Razorpay-Signature"), h.webhookSecret) {
-		h.fail(w, http.StatusBadRequest, "bad signature")
+	// Course enrolments share the Cashfree account; theirs are acknowledged
+	// and left alone, so the two handlers cannot fulfil each other's payments.
+	if !ev.succeeded() || !strings.HasPrefix(ev.OrderID, "cert_") {
+		h.write(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
-	var ev struct {
-		Event   string `json:"event"`
-		Payload struct {
-			Payment struct {
-				Entity struct {
-					ID      string            `json:"id"`
-					OrderID string            `json:"order_id"`
-					Notes   map[string]string `json:"notes"`
-				} `json:"entity"`
-			} `json:"payment"`
-		} `json:"payload"`
-	}
-	if err := json.Unmarshal(raw, &ev); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid json")
+	if err := h.checkAmount(r.Context(), ev.OrderID, ev.PaidPaise); err != nil {
+		if !errors.Is(err, errNotOurOrder) {
+			h.Log.Error("certification webhook amount mismatch", zap.String("order", ev.OrderID), zap.Error(err))
+		}
+		h.write(w, http.StatusOK, map[string]bool{"ok": true}) // a retry cannot fix either case
 		return
 	}
-	p := ev.Payload.Payment.Entity
-	if (ev.Event == "payment.captured" || ev.Event == "order.paid") && p.OrderID != "" && p.ID != "" {
-		// Course enrolments and exam registrations both arrive here; fulfil
-		// resolves by order id and simply finds nothing for an order that is
-		// not ours, so the two handlers cannot fulfil each other's payments.
-		if _, err := h.fulfil(r.Context(), p.OrderID, p.ID); err != nil {
-			if errors.Is(err, errNotOurOrder) {
-				h.write(w, http.StatusOK, map[string]bool{"ok": true})
-				return
-			}
-			h.Log.Error("certification webhook fulfilment failed", zap.String("order", p.OrderID), zap.Error(err))
-			// 500 makes Razorpay retry, which is what we want for a transient error.
-			h.fail(w, http.StatusInternalServerError, "fulfilment failed")
+	if _, err := h.fulfil(r.Context(), ev.OrderID, ev.PaymentID); err != nil {
+		if errors.Is(err, errNotOurOrder) {
+			h.write(w, http.StatusOK, map[string]bool{"ok": true})
 			return
 		}
+		h.Log.Error("certification webhook fulfilment failed", zap.String("order", ev.OrderID), zap.Error(err))
+		// 500 makes Cashfree retry, which is what we want for a transient error.
+		h.fail(w, http.StatusInternalServerError, "fulfilment failed")
+		return
 	}
 	h.write(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-var errNotOurOrder = errors.New("order is not a certification registration")
+// checkAmount refuses a payment that does not match the registration it pays
+// for; the amount was fixed on the row before checkout opened.
+func (h *CertificationHandler) checkAmount(ctx context.Context, gatewayOrderID string, paidPaise int64) error {
+	var want int64
+	err := h.Pool.QueryRow(ctx, `SELECT amount_paise FROM certification_registrations WHERE gateway_order_id = $1`,
+		gatewayOrderID).Scan(&want)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errNotOurOrder
+	}
+	if err != nil {
+		return err
+	}
+	if want != paidPaise {
+		return fmt.Errorf("paid %d paise, registration is for %d", paidPaise, want)
+	}
+	return nil
+}
+
+// errNotOurOrder is an order id the handler has no row for — typically the
+// other handler's order on a shared webhook.
+var errNotOurOrder = errors.New("order does not belong to this handler")
 
 type certFulfilResult struct {
 	Status   string `json:"status"`
@@ -568,16 +595,16 @@ type certFulfilResult struct {
 // Idempotent in the same way as enrolment: only the caller that moves the row
 // out of 'created' does the work, so verify and webhook racing each other
 // cannot mail two links or write two invites.
-func (h *CertificationHandler) fulfil(ctx context.Context, rzpOrderID, paymentID string) (*certFulfilResult, error) {
+func (h *CertificationHandler) fulfil(ctx context.Context, gatewayOrderID, paymentID string) (*certFulfilResult, error) {
 	var regID, examID, name, email, phone, examTitle, assessmentID string
 	var referralCode, referralFlags string
 	var amountPaise, referralDiscount int64
 	var linkValidDays int
 	err := h.Pool.QueryRow(ctx, `
 		UPDATE certification_registrations reg
-		   SET status = 'paid', razorpay_payment_id = $2, paid_at = now(), updated_at = now()
+		   SET status = 'paid', gateway_payment_id = $2, paid_at = now(), updated_at = now()
 		  FROM certification_exams e
-		 WHERE reg.razorpay_order_id = $1
+		 WHERE reg.gateway_order_id = $1
 		   AND e.id = reg.exam_id
 		   -- A registration whose invite could not be written is retried by the
 		   -- next verify / webhook rather than staying stuck: 'paid' with no
@@ -586,7 +613,7 @@ func (h *CertificationHandler) fulfil(ctx context.Context, rzpOrderID, paymentID
 		RETURNING reg.id::text, reg.exam_id::text, reg.name, reg.email, reg.phone,
 		          e.title, e.assessment_id::text, e.link_valid_days,
 		          reg.referral_code, reg.referral_discount_paise, reg.referral_flags, reg.amount_paise
-	`, rzpOrderID, paymentID).Scan(&regID, &examID, &name, &email, &phone, &examTitle, &assessmentID,
+	`, gatewayOrderID, paymentID).Scan(&regID, &examID, &name, &email, &phone, &examTitle, &assessmentID,
 		&linkValidDays, &referralCode, &referralDiscount, &referralFlags, &amountPaise)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -596,8 +623,8 @@ func (h *CertificationHandler) fulfil(ctx context.Context, rzpOrderID, paymentID
 		if err := h.Pool.QueryRow(ctx, `
 			SELECT reg.status, reg.email, e.title, reg.claim_expires_at
 			FROM   certification_registrations reg JOIN certification_exams e ON e.id = reg.exam_id
-			WHERE  reg.razorpay_order_id = $1
-		`, rzpOrderID).Scan(&status, &storedEmail, &title, &expires); err != nil {
+			WHERE  reg.gateway_order_id = $1
+		`, gatewayOrderID).Scan(&status, &storedEmail, &title, &expires); err != nil {
 			return nil, errNotOurOrder
 		}
 		res := &certFulfilResult{Status: status, Email: storedEmail, ExamName: title}

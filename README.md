@@ -45,7 +45,7 @@ To avoid conflicts, the `notification-service` is mapped to host port **`8085`**
 ## 3. Database Connection Details
 The PostgreSQL database runs inside the Docker container (`dashbord_backend-postgres-1`):
 - **Host**: `localhost`
-- **Port**: `5432`
+- **Port**: `5435` on your machine (`POSTGRES_HOST_PORT`; 5432 is often taken by a locally installed Postgres). Inside the stack it is `postgres:5432`.
 - **Database Name**: `skillofide`
 - **User**: `skillofide`
 - **Password**: `password`

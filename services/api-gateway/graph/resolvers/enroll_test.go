@@ -1,44 +1,8 @@
 package resolvers
 
-import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"testing"
-)
+import "testing"
 
-func sign(msg, secret string) string {
-	m := hmac.New(sha256.New, []byte(secret))
-	m.Write([]byte(msg))
-	return hex.EncodeToString(m.Sum(nil))
-}
-
-func TestValidPaymentSignature(t *testing.T) {
-	sig := sign("order_ABC|pay_XYZ", "s3cret")
-	if !validPaymentSignature("order_ABC", "pay_XYZ", sig, "s3cret") {
-		t.Fatal("valid signature rejected")
-	}
-	for name, c := range map[string][4]string{
-		"wrong secret":  {"order_ABC", "pay_XYZ", sig, "other"},
-		"swapped ids":   {"pay_XYZ", "order_ABC", sig, "s3cret"},
-		"other payment": {"order_ABC", "pay_OTHER", sig, "s3cret"},
-		"empty":         {"order_ABC", "pay_XYZ", "", "s3cret"},
-	} {
-		if validPaymentSignature(c[0], c[1], c[2], c[3]) {
-			t.Errorf("%s: forged signature accepted", name)
-		}
-	}
-}
-
-func TestValidWebhookSignature(t *testing.T) {
-	body := []byte(`{"event":"payment.captured"}`)
-	if !validWebhookSignature(body, sign(string(body), "wh"), "wh") {
-		t.Fatal("valid webhook rejected")
-	}
-	if validWebhookSignature([]byte(`{"event":"payment.captured","x":1}`), sign(string(body), "wh"), "wh") {
-		t.Fatal("tampered body accepted")
-	}
-}
+// Payment verification is covered in cashfree_test.go.
 
 func TestFeeFor(t *testing.T) {
 	cases := []struct {

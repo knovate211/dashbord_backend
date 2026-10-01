@@ -10,7 +10,7 @@ Keep this file current when architecture, ports, env vars or workflows change.
 Go microservices backend for the **Skillofide / Knovate** learning platform:
 coding practice with a real judge, course quizzes, timed assessments
 (scholarship, hiring, certification), admin panel, recruiter portal, live-class
-attendance, and paid enrolment via Razorpay.
+attendance, and paid enrolment via Cashfree.
 
 - Repo: `git@github-knovate211:knovate211/dashbord_backend.git` (Go module paths use `github.com/knovate211/...`)
 - Branches: `main` (deploys to prod on push), `stage` (working branch)
@@ -42,7 +42,7 @@ services ◄── NATS JetStream (subjects: submission.>, execution.>) ──�
 
 | Service | gRPC port | Owns |
 |---|---|---|
-| `api-gateway` | HTTP 8080 | REST + GraphQL, JWT auth, CORS, rate limits, emails, Razorpay, JSearch. Also talks to Postgres **directly** (`DATABASE_URL`) for most non-core features |
+| `api-gateway` | HTTP 8080 | REST + GraphQL, JWT auth, CORS, rate limits, emails, Cashfree payments, JSearch. Also talks to Postgres **directly** (`DATABASE_URL`) for most non-core features |
 | `problem-service` | 50051 | problems, test cases, signatures, starter code (Redis cache) |
 | `execution-service` | 50052 | judge + sandbox; codegen of drivers/starters per language |
 | `submission-service` | 50053 | submissions; orchestrator calls execution, reports to progress |
@@ -80,7 +80,7 @@ services ◄── NATS JetStream (subjects: submission.>, execution.>) ──�
 | `/api/hiring/claim` | public | candidate magic link; the rest of `/api/hiring/*` checks company membership |
 | `/api/integrity/*` | JWT | device sessions, code snapshots, reviewer report (similarity, AI signals, risk rating) |
 | `/api/attendance/*` | JWT | live classes and attendance |
-| `/api/enroll/{config,order,verify,webhook}` | public | Razorpay course purchase |
+| `/api/enroll/{config,order,verify,webhook}` | public | Cashfree course purchase (certification exams use `/api/certification/{order,verify,webhook}`) |
 | `/api/certification/{config,order,verify,webhook,claim,credential}` | public | certification exams + public credential verify |
 | `/api/password-reset/{request,confirm}` | public | self-service reset with single-use codes |
 | `/api/recruiter/*` | JWT + role/company | test authoring, invites, results, shortlists |
@@ -112,7 +112,7 @@ docker compose up --build -d          # postgres, redis, nats, mailpit, migratio
 | Thing | Host address |
 |---|---|
 | Gateway | `http://localhost:8080` |
-| Postgres | `localhost:5432`, user/pass/db `skillofide` / `password` / `skillofide` |
+| Postgres | `localhost:5435` from the host (`POSTGRES_HOST_PORT`), `postgres:5432` inside compose, user/pass/db `skillofide` / `password` / `skillofide` |
 | Redis | `localhost:6380`, **not 6379**, because another local project (`b4igo-redis`) holds 6379. Containers still use `redis:6379` |
 | NATS | `4222` (client), `8222` (monitoring) |
 | Mailpit inbox | `http://localhost:8025` (SMTP 1025). All dev email lands here |
@@ -132,7 +132,7 @@ A missing runner image fails **silently as far as the learner can tell**: correc
 
 Gateway: `JWT_SECRET`, `ALLOWED_ORIGINS`, `DATABASE_URL`, `DEV_MODE`, `APP_BASE_URL` (test-portal origin; builds every claim link), `SITE_BASE_URL`,
 `SMTP_HOST/PORT/USER/PASS/FROM` (leaving `SMTP_HOST` unset is supported: links are only logged), `INQUIRY_NOTIFY_TO`, `SCHOLARSHIP_NOTIFY_TO`, `CERTIFICATION_NOTIFY_TO`,
-`RAZORPAY_KEY_ID/KEY_SECRET/WEBHOOK_SECRET` (empty = online payment off, "request a callback" instead), `JSEARCH_API_KEY`,
+`CASHFREE_APP_ID/SECRET_KEY` (empty = online payment off, "request a callback" instead), `CASHFREE_ENV` (sandbox|production), `PAYMENT_WEBHOOK_BASE` (public https origin for per-order webhooks), `JSEARCH_API_KEY`,
 rate limits `{SCHOLARSHIP,INQUIRY,ENROLL,PASSWORD_RESET}_{IP,EMAIL}_LIMIT` (per-IP defaults to 0/off because campuses share one NAT IP), `SCHOLARSHIP_SWEEP_MIN`, `CERTIFICATION_SWEEP_MIN`.
 
 Execution: `EXEC_STARTUP_GRACE_MS` (default 3000), `EXEC_MAX_CONCURRENT` (blank = derived from CPU count; oversubscribing makes correct code time out).
