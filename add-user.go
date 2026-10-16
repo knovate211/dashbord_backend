@@ -8,8 +8,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/skillofide/proto/codec"
-	userv1 "github.com/skillofide/proto/user/v1"
+	"github.com/knovate211/proto/codec"
+	userv1 "github.com/knovate211/proto/user/v1"
 )
 
 func main() {

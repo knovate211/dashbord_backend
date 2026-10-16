@@ -5,7 +5,7 @@ package generated
 import (
 	"github.com/graphql-go/graphql"
 
-	"github.com/skillofide/api-gateway/graph/resolvers"
+	"github.com/knovate211/api-gateway/graph/resolvers"
 )
 
 // ─── Shared GraphQL Types ─────────────────────────────────────────────────────
@@ -108,6 +108,7 @@ var testResultType = graphql.NewObject(graphql.ObjectConfig{
 		"status":         &graphql.Field{Type: graphql.String},
 		"executionMs":    &graphql.Field{Type: graphql.Int},
 		"error":          &graphql.Field{Type: graphql.String},
+		"isHidden":       &graphql.Field{Type: graphql.Boolean},
 	},
 })
 
@@ -380,6 +381,9 @@ func BuildSchema(clients *Clients) (graphql.Schema, error) {
 			Type: problemType,
 			Args: graphql.FieldConfigArgument{
 				"id": {Type: graphql.NewNonNull(graphql.String)},
+				// attemptId unlocks a private problem for the candidate
+				// whose test attempt contains it.
+				"attemptId": {Type: graphql.String},
 			},
 			Resolve: clients.Problems.GetProblem,
 		},

@@ -8,9 +8,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/skillofide/problem-service/internal/cache"
-	"github.com/skillofide/problem-service/internal/repository"
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	"github.com/knovate211/problem-service/internal/cache"
+	"github.com/knovate211/problem-service/internal/repository"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 // ProblemHandler implements problemv1.ProblemServiceServer.

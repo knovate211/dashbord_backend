@@ -1,4 +1,4 @@
-module github.com/skillofide/execution-service
+module github.com/knovate211/execution-service
 
 go 1.22
 

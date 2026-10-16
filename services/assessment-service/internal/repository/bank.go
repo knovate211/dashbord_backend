@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // UpsertMcqQuestion creates or replaces a bank question together with its
@@ -33,22 +33,26 @@ func (r *Repo) UpsertMcqQuestion(ctx context.Context, req *assessmentv1.UpsertMc
 	id := q.Id
 	if id == "" {
 		err = tx.QueryRow(ctx, `
-			INSERT INTO mcq_questions (company_id, topic, difficulty, body, kind, explanation, is_active, created_by)
-			VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+			INSERT INTO mcq_questions (company_id, topic, difficulty, body, kind, explanation, is_active, created_by, course_id)
+			VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)
 			RETURNING id
 		`, nullable(q.CompanyId), defaultStr(q.Topic, "General"), defaultStr(q.Difficulty, "Medium"),
-			q.Body, defaultStr(q.Kind, "single"), q.Explanation, nullable(req.ActorId)).Scan(&id)
+			q.Body, defaultStr(q.Kind, "single"), q.Explanation, nullable(req.ActorId),
+			strings.TrimSpace(q.CourseId)).Scan(&id)
 		if err != nil {
 			return "", fmt.Errorf("insert mcq question: %w", err)
 		}
 	} else {
+		// A scoped edit only matches the company's own questions, so a
+		// recruiter's edit of a platform or foreign question is "not found".
 		ct, err := tx.Exec(ctx, `
 			UPDATE mcq_questions
 			SET    topic = $2, difficulty = $3, body = $4, kind = $5,
-			       explanation = $6, is_active = $7
-			WHERE  id = $1
+			       explanation = $6, is_active = $7, course_id = $8
+			WHERE  id = $1 AND ($9 = '' OR company_id::text = $9)
 		`, id, defaultStr(q.Topic, "General"), defaultStr(q.Difficulty, "Medium"),
-			q.Body, defaultStr(q.Kind, "single"), q.Explanation, q.IsActive)
+			q.Body, defaultStr(q.Kind, "single"), q.Explanation, q.IsActive,
+			strings.TrimSpace(q.CourseId), req.CompanyScope)
 		if err != nil {
 			return "", fmt.Errorf("update mcq question: %w", err)
 		}
@@ -120,6 +124,18 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 		// A company sees its own bank plus the shared platform bank.
 		add("(company_id = $%d OR company_id IS NULL)", req.CompanyId)
 	}
+	// Deleted questions are soft-deleted (see DeleteMcqQuestion); the bank
+	// screen should not keep showing them unless asked.
+	if !req.IncludeRetired {
+		clauses = append(clauses, "is_active = true")
+	}
+	switch req.CourseId {
+	case "":
+	case assessmentv1.McqGeneralCourse:
+		clauses = append(clauses, "course_id = ''")
+	default:
+		add("course_id = $%d", req.CourseId)
+	}
 	if req.Topic != "" {
 		add("topic = $%d", req.Topic)
 	}
@@ -141,7 +157,7 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, COALESCE(company_id::text, ''), topic, difficulty, body, kind,
+		SELECT id, COALESCE(company_id::text, ''), course_id, topic, difficulty, body, kind,
 		       explanation, is_active, created_at
 		FROM   mcq_questions %s
 		ORDER  BY created_at DESC
@@ -166,7 +182,7 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 	for rows.Next() {
 		q := &assessmentv1.McqQuestion{Options: []*assessmentv1.McqOption{}}
 		var created any
-		if err := rows.Scan(&q.Id, &q.CompanyId, &q.Topic, &q.Difficulty, &q.Body,
+		if err := rows.Scan(&q.Id, &q.CompanyId, &q.CourseId, &q.Topic, &q.Difficulty, &q.Body,
 			&q.Kind, &q.Explanation, &q.IsActive, &created); err != nil {
 			return nil, fmt.Errorf("scan mcq question: %w", err)
 		}
@@ -208,8 +224,11 @@ func (r *Repo) ListMcqQuestions(ctx context.Context, req *assessmentv1.ListMcqQu
 // DeleteMcqQuestion retires a question. It is a soft delete: a hard delete
 // would either break the foreign key from a published test or silently rewrite
 // history for attempts that already used it.
-func (r *Repo) DeleteMcqQuestion(ctx context.Context, id string) error {
-	ct, err := r.pool.Exec(ctx, `UPDATE mcq_questions SET is_active = false WHERE id = $1`, id)
+func (r *Repo) DeleteMcqQuestion(ctx context.Context, id, companyScope string) error {
+	ct, err := r.pool.Exec(ctx, `
+		UPDATE mcq_questions SET is_active = false
+		WHERE  id = $1 AND ($2 = '' OR company_id::text = $2)
+	`, id, companyScope)
 	if err != nil {
 		return fmt.Errorf("retire mcq question: %w", err)
 	}

@@ -8,8 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	pkgauth "github.com/skillofide/pkg/auth"
-	userv1 "github.com/skillofide/proto/user/v1"
+	pkgauth "github.com/knovate211/pkg/auth"
+	userv1 "github.com/knovate211/proto/user/v1"
 )
 
 type UserRepository struct {

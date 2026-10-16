@@ -14,15 +14,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
-	pkglog "github.com/skillofide/pkg/logger"
-	"github.com/skillofide/proto/codec"
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	pkglog "github.com/knovate211/pkg/logger"
+	"github.com/knovate211/proto/codec"
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 
-	"github.com/skillofide/execution-service/internal/handler"
-	"github.com/skillofide/execution-service/internal/judge"
-	"github.com/skillofide/execution-service/internal/sandbox"
-	"github.com/skillofide/execution-service/internal/worker"
+	"github.com/knovate211/execution-service/internal/handler"
+	"github.com/knovate211/execution-service/internal/judge"
+	"github.com/knovate211/execution-service/internal/sandbox"
+	"github.com/knovate211/execution-service/internal/worker"
 )
 
 func main() {

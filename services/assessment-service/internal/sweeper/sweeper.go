@@ -11,7 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/skillofide/assessment-service/internal/repository"
+	"github.com/knovate211/assessment-service/internal/repository"
 )
 
 // Run sweeps every interval until ctx is cancelled.

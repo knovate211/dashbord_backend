@@ -9,16 +9,20 @@ import (
 	"github.com/graphql-go/graphql"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/api-gateway/middleware"
-	problemv1 "github.com/skillofide/proto/problem/v1"
-	userv1 "github.com/skillofide/proto/user/v1"
+	"github.com/knovate211/api-gateway/middleware"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
+	userv1 "github.com/knovate211/proto/user/v1"
 )
 
 // ProblemClients holds all gRPC clients needed for problem resolvers.
 type ProblemClients struct {
 	ProblemSvc problemv1.ProblemServiceClient
 	UserSvc    userv1.UserServiceClient
-	Log        *zap.Logger
+	// AssessmentSvc checks that a private problem is part of the caller's
+	// own test attempt before its statement is served.
+	AssessmentSvc assessmentv1.AssessmentServiceClient
+	Log           *zap.Logger
 }
 
 // ListProblemsResolver handles the listProblems GraphQL query.
@@ -59,6 +63,12 @@ func (c *ProblemClients) GetProblem(p graphql.ResolveParams) (interface{}, error
 
 	prob, err := c.ProblemSvc.GetProblem(p.Context, req)
 	if err != nil {
+		return nil, fmt.Errorf("problem not found: %s", id)
+	}
+	// A private problem answers "not found" rather than "forbidden" so its id
+	// or slug cannot be confirmed by probing.
+	if prob.IsPrivate && !isAdmin(p.Context) &&
+		!attemptHasProblem(p.Context, c.AssessmentSvc, userID, stringArg(p, "attemptId"), prob.Id) {
 		return nil, fmt.Errorf("problem not found: %s", id)
 	}
 

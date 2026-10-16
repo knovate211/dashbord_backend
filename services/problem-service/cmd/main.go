@@ -12,14 +12,14 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/skillofide/proto/codec" // register JSON codec
-	problemv1 "github.com/skillofide/proto/problem/v1"
-	pkgdb "github.com/skillofide/pkg/database"
-	pkglog "github.com/skillofide/pkg/logger"
+	"github.com/knovate211/proto/codec" // register JSON codec
+	problemv1 "github.com/knovate211/proto/problem/v1"
+	pkgdb "github.com/knovate211/pkg/database"
+	pkglog "github.com/knovate211/pkg/logger"
 
-	"github.com/skillofide/problem-service/internal/cache"
-	"github.com/skillofide/problem-service/internal/handler"
-	"github.com/skillofide/problem-service/internal/repository"
+	"github.com/knovate211/problem-service/internal/cache"
+	"github.com/knovate211/problem-service/internal/handler"
+	"github.com/knovate211/problem-service/internal/repository"
 )
 
 func main() {

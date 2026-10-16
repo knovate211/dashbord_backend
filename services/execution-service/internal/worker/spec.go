@@ -1,9 +1,9 @@
 package worker
 
 import (
-	"github.com/skillofide/execution-service/internal/codegen"
-	"github.com/skillofide/execution-service/internal/sandbox"
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	"github.com/knovate211/execution-service/internal/codegen"
+	"github.com/knovate211/execution-service/internal/sandbox"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 // toSandboxSpec converts the wire form of a problem's execution contract into

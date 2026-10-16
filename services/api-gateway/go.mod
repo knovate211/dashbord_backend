@@ -1,4 +1,4 @@
-module github.com/skillofide/api-gateway
+module github.com/knovate211/api-gateway
 
 go 1.22
 

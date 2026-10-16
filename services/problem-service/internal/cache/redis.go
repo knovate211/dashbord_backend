@@ -10,7 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 const (

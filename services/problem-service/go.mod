@@ -1,4 +1,4 @@
-module github.com/skillofide/problem-service
+module github.com/knovate211/problem-service
 
 go 1.22
 

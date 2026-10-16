@@ -4,9 +4,9 @@ package judge
 import (
 	"strings"
 
-	"github.com/skillofide/execution-service/internal/sandbox"
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	problemv1 "github.com/skillofide/proto/problem/v1"
+	"github.com/knovate211/execution-service/internal/sandbox"
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 // Status constants for test results.
@@ -50,6 +50,7 @@ func (j *Judge) EvaluateTestCaseWithSpec(tc *problemv1.TestCase, res *sandbox.Ru
 		ExpectedOutput: tc.ExpectedOutput,
 		ActualOutput:   strings.TrimSpace(res.Stdout),
 		ExecutionMs:    res.ExecutionMs,
+		IsHidden:       tc.IsHidden,
 	}
 
 	switch {

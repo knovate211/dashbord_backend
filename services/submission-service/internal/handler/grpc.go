@@ -8,9 +8,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/skillofide/submission-service/internal/orchestrator"
-	"github.com/skillofide/submission-service/internal/repository"
-	submissionv1 "github.com/skillofide/proto/submission/v1"
+	"github.com/knovate211/submission-service/internal/orchestrator"
+	"github.com/knovate211/submission-service/internal/repository"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
 )
 
 // SubmissionHandler implements submissionv1.SubmissionServiceServer.

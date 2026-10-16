@@ -92,6 +92,9 @@ func New(log *zap.Logger) (*DockerSandbox, error) {
 	return &DockerSandbox{cli: cli, log: log, slots: make(chan struct{}, n)}, nil
 }
 
+// Capacity is how many containers may run at once.
+func (s *DockerSandbox) Capacity() int { return cap(s.slots) }
+
 // maxConcurrentRuns sizes the pool. Each container is pinned to one CPU, so the
 // question is how many can run before they start stealing time from each other
 // and from the services around them.
@@ -134,6 +137,23 @@ func startupGraceMs() int {
 	}
 	return 3000
 }
+
+// pidsLimit caps processes and threads in one run. It is generous because
+// threads count too: the JVM, the Go compiler and the SQL runner's Postgres
+// each start dozens. EXEC_PIDS_LIMIT overrides it.
+func pidsLimit() int64 {
+	if v := os.Getenv("EXEC_PIDS_LIMIT"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 256
+}
+
+// maxOutputBytes caps how much of each stream is kept. A print loop can emit
+// hundreds of megabytes before its time limit; without a cap it is all held in
+// memory here and then shipped through NATS.
+const maxOutputBytes = 1 << 20
 
 // Run executes code for a single test case and returns the raw output.
 func (s *DockerSandbox) Run(ctx context.Context, req *RunRequest) (*RunResult, error) {
@@ -210,14 +230,23 @@ func (s *DockerSandbox) Run(ctx context.Context, req *RunRequest) (*RunResult, e
 		Image: image,
 		Env:   envVars,
 	}
-	// Create container with strict resource limits
+	// Create container with strict resource limits. The code is untrusted and
+	// the sandbox talks to the host's Docker daemon, so the container gets no
+	// network, no capabilities, no way to gain privileges, no swap, and a cap
+	// on processes so a fork bomb stays inside it.
+	memBytes := int64(memLimitMb) * 1024 * 1024
+	pids := pidsLimit()
 	resp, err := s.cli.ContainerCreate(ctx,
 		containerCfg,
 		&container.HostConfig{
 			NetworkMode: "none", // no network access for security
+			CapDrop:     []string{"ALL"},
+			SecurityOpt: []string{"no-new-privileges"},
 			Resources: container.Resources{
-				Memory:   int64(memLimitMb) * 1024 * 1024,
-				NanoCPUs: 1_000_000_000, // 1 CPU core
+				Memory:     memBytes,
+				MemorySwap: memBytes,      // equal to Memory: no swap
+				NanoCPUs:   1_000_000_000, // 1 CPU core
+				PidsLimit:  &pids,
 			},
 		},
 		nil, nil, "",
@@ -296,15 +325,25 @@ func (s *DockerSandbox) Run(ctx context.Context, req *RunRequest) (*RunResult, e
 			if frameSize == 0 {
 				continue
 			}
-			payload := make([]byte, frameSize)
-			if _, err := io.ReadFull(logReader, payload); err != nil {
-				break
-			}
+			var buf *bytes.Buffer
 			switch hdr[0] {
 			case 1: // stdout
-				stdoutBuf.Write(payload)
+				buf = &stdoutBuf
 			case 2: // stderr
-				stderrBuf.Write(payload)
+				buf = &stderrBuf
+			}
+			// Keep up to the cap and discard the rest without allocating it.
+			keep := int64(0)
+			if buf != nil {
+				keep = min(int64(frameSize), int64(maxOutputBytes-buf.Len()))
+			}
+			if keep > 0 {
+				if _, err := io.CopyN(buf, logReader, keep); err != nil {
+					break
+				}
+			}
+			if _, err := io.CopyN(io.Discard, logReader, int64(frameSize)-keep); err != nil {
+				break
 			}
 		}
 		stdout = stdoutBuf.String()

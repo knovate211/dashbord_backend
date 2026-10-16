@@ -6,8 +6,8 @@ import (
 	"github.com/graphql-go/graphql"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/api-gateway/middleware"
-	progressv1 "github.com/skillofide/proto/progress/v1"
+	"github.com/knovate211/api-gateway/middleware"
+	progressv1 "github.com/knovate211/proto/progress/v1"
 )
 
 // ProgressClients holds gRPC clients for progress resolvers.

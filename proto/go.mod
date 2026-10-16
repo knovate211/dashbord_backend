@@ -1,4 +1,4 @@
-module github.com/skillofide/proto
+module github.com/knovate211/proto
 
 go 1.22
 

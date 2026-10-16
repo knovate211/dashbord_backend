@@ -9,8 +9,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/notification-service/internal/handler"
-	notificationv1 "github.com/skillofide/proto/notification/v1"
+	"github.com/knovate211/notification-service/internal/handler"
+	notificationv1 "github.com/knovate211/proto/notification/v1"
 )
 
 // NATSSubscriber subscribes to NATS topics and forwards events to the hub.

@@ -29,7 +29,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/skillofide/execution-service/internal/codegen"
+	"github.com/knovate211/execution-service/internal/codegen"
 )
 
 var jsFuncRe = regexp.MustCompile(`function\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)`)

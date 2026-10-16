@@ -76,8 +76,11 @@ type McqOption struct {
 }
 
 type McqQuestion struct {
-	Id          string       `json:"id,omitempty"`
-	CompanyId   string       `json:"company_id,omitempty"` // empty = platform bank
+	Id        string `json:"id,omitempty"`
+	CompanyId string `json:"company_id,omitempty"` // empty = platform bank
+	// CourseId ties the question to one course ('5', 'genai', …); empty is a
+	// general question usable by any course.
+	CourseId    string       `json:"course_id"`
 	Topic       string       `json:"topic"`
 	Difficulty  string       `json:"difficulty"` // Easy | Medium | Hard
 	Body        string       `json:"body"`
@@ -92,6 +95,10 @@ type McqQuestion struct {
 type UpsertMcqQuestionRequest struct {
 	ActorId  string       `json:"actor_id"`
 	Question *McqQuestion `json:"question"`
+	// CompanyScope, when set, limits an edit to questions owned by that
+	// company — a recruiter can never edit the platform bank or another
+	// company's questions. Empty (admins) edits any question.
+	CompanyScope string `json:"company_scope,omitempty"`
 }
 
 type UpsertMcqQuestionResponse struct {
@@ -99,13 +106,22 @@ type UpsertMcqQuestionResponse struct {
 }
 
 type ListMcqQuestionsRequest struct {
-	CompanyId  string `json:"company_id,omitempty"`
-	Topic      string `json:"topic,omitempty"`
-	Difficulty string `json:"difficulty,omitempty"`
-	Search     string `json:"search,omitempty"`
-	Page       int32  `json:"page"`
-	PageSize   int32  `json:"page_size"`
+	CompanyId string `json:"company_id,omitempty"`
+	// CourseId filters to one course; McqGeneralCourse selects the general
+	// (course-less) questions; empty means every course.
+	CourseId string `json:"course_id,omitempty"`
+	// IncludeRetired also returns deleted (soft-deleted) questions.
+	IncludeRetired bool   `json:"include_retired,omitempty"`
+	Topic          string `json:"topic,omitempty"`
+	Difficulty     string `json:"difficulty,omitempty"`
+	Search         string `json:"search,omitempty"`
+	Page           int32  `json:"page"`
+	PageSize       int32  `json:"page_size"`
 }
+
+// McqGeneralCourse is the ListMcqQuestionsRequest.CourseId value that selects
+// questions with no course. An empty CourseId already means "no filter".
+const McqGeneralCourse = "__general"
 
 type ListMcqQuestionsResponse struct {
 	Questions []*McqQuestion `json:"questions"`
@@ -116,6 +132,9 @@ type ListMcqQuestionsResponse struct {
 
 type DeleteMcqQuestionRequest struct {
 	Id string `json:"id"`
+	// CompanyScope limits the delete to that company's questions; see
+	// UpsertMcqQuestionRequest.
+	CompanyScope string `json:"company_scope,omitempty"`
 }
 
 type BulkImportMcqRequest struct {
@@ -165,8 +184,10 @@ type Section struct {
 	// PickCount > 0 draws that many questions per attempt: from the explicit
 	// question list when it is non-empty, otherwise from the MCQ bank filtered
 	// by PickTopic/PickDifficulty.
-	PickCount      int32              `json:"pick_count,omitempty"`
-	PickTopic      string             `json:"pick_topic,omitempty"`
+	PickCount int32  `json:"pick_count,omitempty"`
+	PickTopic string `json:"pick_topic,omitempty"`
+	// PickCourse limits the bank draw to one course's questions; empty = any.
+	PickCourse     string             `json:"pick_course,omitempty"`
 	PickDifficulty string             `json:"pick_difficulty,omitempty"`
 	PickMarks      int32              `json:"pick_marks,omitempty"`
 	PartialCredit  bool               `json:"partial_credit"`
@@ -174,33 +195,40 @@ type Section struct {
 }
 
 type Assessment struct {
-	Id               string      `json:"id,omitempty"`
-	CompanyId        string      `json:"company_id,omitempty"`
-	CompanyName      string      `json:"company_name,omitempty"`
-	Title            string      `json:"title"`
-	Description      string      `json:"description"`
-	Purpose          string      `json:"purpose"` // practice | hiring | scholarship
-	DurationMinutes  int32       `json:"duration_minutes"`
-	TotalMarks       int32       `json:"total_marks"`
-	PassingMarks     int32       `json:"passing_marks"`
-	NegativeMarking  float64     `json:"negative_marking"`
-	ShuffleQuestions bool        `json:"shuffle_questions"`
-	ShuffleOptions   bool        `json:"shuffle_options"`
-	AllowBacktrack   bool        `json:"allow_backtrack"`
-	RevealResults    bool        `json:"reveal_results"`
-	Proctoring       *Proctoring `json:"proctoring,omitempty"`
-	Status           string      `json:"status"` // draft | published | archived
-	OpensAt          string      `json:"opens_at,omitempty"`
-	ClosesAt         string      `json:"closes_at,omitempty"`
-	MaxAttempts      int32       `json:"max_attempts"`
-	CreatedBy        string      `json:"created_by,omitempty"`
-	CreatedAt        string      `json:"created_at,omitempty"`
-	UpdatedAt        string      `json:"updated_at,omitempty"`
-	Sections         []*Section  `json:"sections,omitempty"`
+	Id               string  `json:"id,omitempty"`
+	CompanyId        string  `json:"company_id,omitempty"`
+	CompanyName      string  `json:"company_name,omitempty"`
+	Title            string  `json:"title"`
+	Description      string  `json:"description"`
+	Purpose          string  `json:"purpose"` // practice | hiring | scholarship
+	DurationMinutes  int32   `json:"duration_minutes"`
+	TotalMarks       int32   `json:"total_marks"`
+	PassingMarks     int32   `json:"passing_marks"`
+	NegativeMarking  float64 `json:"negative_marking"`
+	ShuffleQuestions bool    `json:"shuffle_questions"`
+	ShuffleOptions   bool    `json:"shuffle_options"`
+	AllowBacktrack   bool    `json:"allow_backtrack"`
+	// LockForward hides the rest of the paper until the current question is
+	// answered. Orthogonal to AllowBacktrack, which governs the other direction.
+	LockForward   bool        `json:"lock_forward"`
+	RevealResults bool        `json:"reveal_results"`
+	Proctoring    *Proctoring `json:"proctoring,omitempty"`
+	Status        string      `json:"status"` // draft | published | archived
+	OpensAt       string      `json:"opens_at,omitempty"`
+	ClosesAt      string      `json:"closes_at,omitempty"`
+	MaxAttempts   int32       `json:"max_attempts"`
+	CreatedBy     string      `json:"created_by,omitempty"`
+	CreatedAt     string      `json:"created_at,omitempty"`
+	UpdatedAt     string      `json:"updated_at,omitempty"`
+	Sections      []*Section  `json:"sections,omitempty"`
 
 	// Read-only rollups used by list views.
 	QuestionCount int32 `json:"question_count,omitempty"`
-	AttemptCount  int32 `json:"attempt_count,omitempty"`
+	// CourseIds limits a practice test to students enrolled in one of these
+	// courses; empty means every student. A pointer so an update can tell
+	// "not sent" (keep) from "sent empty" (open to everyone).
+	CourseIds    *[]string `json:"course_ids,omitempty"`
+	AttemptCount int32     `json:"attempt_count,omitempty"`
 }
 
 type CreateAssessmentRequest struct {
@@ -362,6 +390,7 @@ type AttemptState struct {
 	Title           string             `json:"title"`
 	Status          string             `json:"status"`
 	AllowBacktrack  bool               `json:"allow_backtrack"`
+	LockForward     bool               `json:"lock_forward"`
 	Proctoring      *Proctoring        `json:"proctoring,omitempty"`
 	ServerNow       string             `json:"server_now"`
 	ExpiresAt       string             `json:"expires_at"`

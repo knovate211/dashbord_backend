@@ -1,4 +1,4 @@
-module github.com/skillofide/assessment-service
+module github.com/knovate211/assessment-service
 
 go 1.22
 

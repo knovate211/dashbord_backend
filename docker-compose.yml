@@ -1,3 +1,7 @@
+# Every port except the gateway's 8080 is bound to 127.0.0.1. The prod file is
+# layered on top of this one, and Compose appends port lists rather than
+# replacing them, so a public binding here is public on the EC2 host too —
+# including execution-service, which holds the Docker socket.
 services:
   # ─── Infrastructure ──────────────────────────────────────────────────────────
   postgres:
@@ -8,7 +12,12 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: skillofide
     ports:
-      - "5432:5432"
+      # Host port 5435, not 5432: a Postgres installed on the Mac itself holds
+      # 127.0.0.1:5432, and the clash stops this container — and every
+      # service that waits on it — from starting. Containers still reach it at
+      # postgres:5432; only host tools (psql, GUI clients) use 5435 (5433 is taken
+      # on this Mac too, 5434 by b4igo-postgres).
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5435}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,7 +31,10 @@ services:
     restart: unless-stopped
     command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save ""
     ports:
-      - "6379:6379"
+      # Host port 6380, not 6379: another local project (b4igo-redis) holds
+      # 6379, and the clash left this whole stack half-started. Containers
+      # still reach Redis at redis:6379; only host tools use 6380.
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -34,8 +46,8 @@ services:
     restart: unless-stopped
     command: "--jetstream --http_port 8222 --store_dir /data"
     ports:
-      - "4222:4222"   # client port
-      - "8222:8222"   # monitoring
+      - "127.0.0.1:4222:4222"   # client port
+      - "127.0.0.1:8222:8222"   # monitoring
     volumes:
       - nats_data:/data
     healthcheck:
@@ -54,8 +66,8 @@ services:
     image: axllent/mailpit:latest
     restart: unless-stopped
     ports:
-      - "8025:8025"   # web UI
-      - "1025:1025"   # SMTP
+      - "127.0.0.1:8025:8025"   # web UI
+      - "127.0.0.1:1025:1025"   # SMTP
     environment:
       MP_MAX_MESSAGES: "5000"
       MP_SMTP_AUTH_ACCEPT_ANY: "true"
@@ -92,7 +104,7 @@ services:
       GRPC_PORT: "50051"
       LOG_LEVEL: info
     ports:
-      - "50051:50051"
+      - "127.0.0.1:50051:50051"
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,7 +133,7 @@ services:
       GRPC_PORT: "50052"
       LOG_LEVEL: info
     ports:
-      - "50052:50052"
+      - "127.0.0.1:50052:50052"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # Docker-in-Docker for sandbox
     depends_on:
@@ -142,7 +154,7 @@ services:
       GRPC_PORT: "50053"
       LOG_LEVEL: info
     ports:
-      - "50053:50053"
+      - "127.0.0.1:50053:50053"
     depends_on:
       postgres:
         condition: service_healthy
@@ -162,7 +174,7 @@ services:
       GRPC_PORT: "50054"
       LOG_LEVEL: info
     ports:
-      - "50054:50054"
+      - "127.0.0.1:50054:50054"
     depends_on:
       postgres:
         condition: service_healthy
@@ -181,7 +193,7 @@ services:
       HTTP_PORT: "8081"
       LOG_LEVEL: info
     ports:
-      - "8085:8081"
+      - "127.0.0.1:8085:8081"
     depends_on:
       nats:
         condition: service_healthy
@@ -196,7 +208,7 @@ services:
       GRPC_PORT: "50055"
       LOG_LEVEL: info
     ports:
-      - "50055:50055"
+      - "127.0.0.1:50055:50055"
     depends_on:
       postgres:
         condition: service_healthy
@@ -215,7 +227,7 @@ services:
       SWEEP_INTERVAL_SECONDS: "30"
       LOG_LEVEL: info
     ports:
-      - "50056:50056"
+      - "127.0.0.1:50056:50056"
     depends_on:
       postgres:
         condition: service_healthy
@@ -267,13 +279,36 @@ services:
       # Staff alerts for new scholarship applications. Falls back to
       # INQUIRY_NOTIFY_TO when unset.
       SCHOLARSHIP_NOTIFY_TO: ${SCHOLARSHIP_NOTIFY_TO:-admissions@knovate.local}
-      # Rate limits on the public apply/claim endpoints. The per-IP cap is a
-      # flood stop sized for a cohort applying together from one campus NAT
-      # address; the per-email cap is the actual abuse control. Raise the IP
-      # limit for a large drive rather than removing it.
-      SCHOLARSHIP_IP_LIMIT: ${SCHOLARSHIP_IP_LIMIT:-200}
-      SCHOLARSHIP_IP_WINDOW_MIN: ${SCHOLARSHIP_IP_WINDOW_MIN:-10}
+      # Online payment (Cashfree) for course enrolment and certification
+      # exams. Leave the keys empty to keep online payment off — the site then
+      # offers "request a callback" instead. CASHFREE_ENV is sandbox unless set
+      # to production; sandbox keys only work against sandbox. Webhooks are
+      # signed with the secret key, so there is no separate webhook secret.
+      # PAYMENT_WEBHOOK_BASE is this gateway's public https origin; when set,
+      # every order carries its own webhook URL (otherwise add one on the
+      # Cashfree dashboard pointing at <api>/api/enroll/webhook).
+      CASHFREE_APP_ID: ${CASHFREE_APP_ID:-}
+      CASHFREE_SECRET_KEY: ${CASHFREE_SECRET_KEY:-}
+      CASHFREE_ENV: ${CASHFREE_ENV:-sandbox}
+      PAYMENT_WEBHOOK_BASE: ${PAYMENT_WEBHOOK_BASE:-}
+      # Testing only: point the gateway at a stand-in for Cashfree's API.
+      # Empty means the real endpoint for CASHFREE_ENV.
+      CASHFREE_API_BASE: ${CASHFREE_API_BASE:-}
+      SITE_BASE_URL: ${SITE_BASE_URL:-http://localhost:3000}
+      # Rate limits on the public forms. Per-IP limits are OFF (0) by default:
+      # a whole campus shares one NAT address, and an IP cap blocks real
+      # students on drive day. Abuse is stopped per email instead (and by the
+      # honeypot on the forms). Set an *_IP_LIMIT above 0 only if a flood from
+      # a single address ever needs stopping.
+      SCHOLARSHIP_IP_LIMIT: ${SCHOLARSHIP_IP_LIMIT:-0}
       SCHOLARSHIP_EMAIL_LIMIT: ${SCHOLARSHIP_EMAIL_LIMIT:-5}
+      INQUIRY_IP_LIMIT: ${INQUIRY_IP_LIMIT:-0}
+      INQUIRY_EMAIL_LIMIT: ${INQUIRY_EMAIL_LIMIT:-5}
+      ENROLL_IP_LIMIT: ${ENROLL_IP_LIMIT:-0}
+      ENROLL_EMAIL_LIMIT: ${ENROLL_EMAIL_LIMIT:-10}
+      PASSWORD_RESET_IP_LIMIT: ${PASSWORD_RESET_IP_LIMIT:-}
+      PASSWORD_RESET_EMAIL_LIMIT: ${PASSWORD_RESET_EMAIL_LIMIT:-5}
+      SCHOLARSHIP_IP_WINDOW_MIN: ${SCHOLARSHIP_IP_WINDOW_MIN:-10}
       # How often to retire scholarship links that lapsed unused, in minutes.
       SCHOLARSHIP_SWEEP_MIN: ${SCHOLARSHIP_SWEEP_MIN:-15}
     ports:

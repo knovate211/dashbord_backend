@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // CreateAssessment stores a new draft test.
@@ -31,14 +31,16 @@ func (r *Repo) CreateAssessment(ctx context.Context, req *assessmentv1.CreateAss
 		INSERT INTO assessments (
 			company_id, title, description, purpose, duration_minutes, passing_marks,
 			negative_marking, shuffle_questions, shuffle_options, allow_backtrack,
-			reveal_results, proctoring, opens_at, closes_at, max_attempts, created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			lock_forward, reveal_results, proctoring, opens_at, closes_at,
+			max_attempts, created_by, course_ids)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING id
 	`,
 		nullable(a.CompanyId), a.Title, a.Description, defaultStr(a.Purpose, "practice"),
 		a.DurationMinutes, a.PassingMarks, a.NegativeMarking, a.ShuffleQuestions,
-		a.ShuffleOptions, a.AllowBacktrack, a.RevealResults, proctoring,
+		a.ShuffleOptions, a.AllowBacktrack, a.LockForward, a.RevealResults, proctoring,
 		parseTime(a.OpensAt), parseTime(a.ClosesAt), maxInt32(a.MaxAttempts, 1), req.ActorId,
+		courseList(a.CourseIds),
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert assessment: %w", err)
@@ -91,10 +93,11 @@ func (r *Repo) UpdateAssessment(ctx context.Context, req *assessmentv1.UpdateAss
 			duration_minutes = CASE WHEN $4 > 0 THEN $4 ELSE duration_minutes END,
 			passing_marks    = CASE WHEN $5 > 0 THEN $5 ELSE passing_marks END,
 			negative_marking = CASE WHEN $6 > 0 THEN $6 ELSE negative_marking END,
-			shuffle_questions = CASE WHEN $15 THEN $7  ELSE shuffle_questions END,
-			shuffle_options   = CASE WHEN $15 THEN $8  ELSE shuffle_options   END,
-			allow_backtrack   = CASE WHEN $15 THEN $9  ELSE allow_backtrack   END,
-			reveal_results    = CASE WHEN $15 THEN $10 ELSE reveal_results    END,
+			shuffle_questions = CASE WHEN $16 THEN $7  ELSE shuffle_questions END,
+			shuffle_options   = CASE WHEN $16 THEN $8  ELSE shuffle_options   END,
+			allow_backtrack   = CASE WHEN $16 THEN $9  ELSE allow_backtrack   END,
+			lock_forward      = CASE WHEN $16 THEN $15 ELSE lock_forward      END,
+			reveal_results    = CASE WHEN $16 THEN $10 ELSE reveal_results    END,
 			proctoring       = COALESCE($11::jsonb, proctoring),
 			opens_at         = COALESCE($12, opens_at),
 			closes_at        = COALESCE($13, closes_at),
@@ -104,7 +107,7 @@ func (r *Repo) UpdateAssessment(ctx context.Context, req *assessmentv1.UpdateAss
 	`, a.Id, a.Title, a.Description, a.DurationMinutes, a.PassingMarks,
 		a.NegativeMarking, a.ShuffleQuestions, a.ShuffleOptions, a.AllowBacktrack,
 		a.RevealResults, proctoring, parseTime(a.OpensAt), parseTime(a.ClosesAt),
-		a.MaxAttempts,
+		a.MaxAttempts, a.LockForward,
 		// "The caller sent the whole assessment" — the admin editor always
 		// includes the title, so its presence is what distinguishes a full save
 		// from a one-field patch.
@@ -115,7 +118,32 @@ func (r *Repo) UpdateAssessment(ctx context.Context, req *assessmentv1.UpdateAss
 	if ct.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	// Audience is only rewritten when the caller sent it — see CourseIds.
+	if a.CourseIds != nil {
+		if _, err := r.pool.Exec(ctx, `UPDATE assessments SET course_ids = $2 WHERE id = $1`,
+			a.Id, courseList(a.CourseIds)); err != nil {
+			return fmt.Errorf("update assessment audience: %w", err)
+		}
+	}
 	return nil
+}
+
+// courseList normalises an audience list: trimmed, de-duplicated, never nil
+// (the column is NOT NULL and '{}' means everyone).
+func courseList(ids *[]string) []string {
+	out := []string{}
+	if ids == nil {
+		return out
+	}
+	seen := map[string]bool{}
+	for _, id := range *ids {
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // GetAssessment loads a test with its sections and questions. The answer key is
@@ -126,21 +154,24 @@ func (r *Repo) GetAssessment(ctx context.Context, id string, includeKey bool) (*
 	var proctoring []byte
 	var companyID, companyName *string
 	var opensAt, closesAt, createdAt, updatedAt *time.Time
+	courseIDs := []string{}
 
 	err := r.pool.QueryRow(ctx, `
 		SELECT a.id, a.company_id::text, c.name, a.title, a.description, a.purpose,
 		       a.duration_minutes, a.total_marks, a.passing_marks, a.negative_marking,
-		       a.shuffle_questions, a.shuffle_options, a.allow_backtrack, a.reveal_results,
+		       a.shuffle_questions, a.shuffle_options, a.allow_backtrack, a.lock_forward,
+		       a.reveal_results,
 		       a.proctoring, a.status, a.opens_at, a.closes_at, a.max_attempts,
-		       a.created_by::text, a.created_at, a.updated_at
+		       a.created_by::text, a.created_at, a.updated_at, a.course_ids
 		FROM   assessments a
 		LEFT   JOIN companies c ON c.id = a.company_id
 		WHERE  a.id = $1
 	`, id).Scan(&a.Id, &companyID, &companyName, &a.Title, &a.Description, &a.Purpose,
 		&a.DurationMinutes, &a.TotalMarks, &a.PassingMarks, &a.NegativeMarking,
-		&a.ShuffleQuestions, &a.ShuffleOptions, &a.AllowBacktrack, &a.RevealResults,
+		&a.ShuffleQuestions, &a.ShuffleOptions, &a.AllowBacktrack, &a.LockForward,
+		&a.RevealResults,
 		&proctoring, &a.Status, &opensAt, &closesAt, &a.MaxAttempts,
-		&a.CreatedBy, &createdAt, &updatedAt)
+		&a.CreatedBy, &createdAt, &updatedAt, &courseIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -150,6 +181,7 @@ func (r *Repo) GetAssessment(ctx context.Context, id string, includeKey bool) (*
 
 	a.CompanyId = derefStr(companyID)
 	a.CompanyName = derefStr(companyName)
+	a.CourseIds = &courseIDs
 	a.Proctoring = defaultProctoring()
 	fromJSON(proctoring, a.Proctoring)
 	a.OpensAt, a.ClosesAt = fmtTime(opensAt), fmtTime(closesAt)
@@ -174,7 +206,7 @@ func (r *Repo) loadSections(ctx context.Context, assessmentID string, includeTit
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, title, kind, order_index, COALESCE(duration_minutes, 0),
 		       cutoff_marks, COALESCE(pick_count, 0), pick_topic, pick_difficulty,
-		       pick_marks, partial_credit
+		       pick_marks, partial_credit, pick_course
 		FROM   assessment_sections
 		WHERE  assessment_id = $1
 		ORDER  BY order_index, title
@@ -190,7 +222,7 @@ func (r *Repo) loadSections(ctx context.Context, assessmentID string, includeTit
 		s := &assessmentv1.Section{AssessmentId: assessmentID, Questions: []*assessmentv1.SectionQuestion{}}
 		if err := rows.Scan(&s.Id, &s.Title, &s.Kind, &s.OrderIndex, &s.DurationMinutes,
 			&s.CutoffMarks, &s.PickCount, &s.PickTopic, &s.PickDifficulty,
-			&s.PickMarks, &s.PartialCredit); err != nil {
+			&s.PickMarks, &s.PartialCredit, &s.PickCourse); err != nil {
 			return nil, fmt.Errorf("scan section: %w", err)
 		}
 		sections = append(sections, s)
@@ -278,7 +310,13 @@ func (r *Repo) ListAssessments(ctx context.Context, req *assessmentv1.ListAssess
 		SELECT a.id, COALESCE(a.company_id::text, ''), COALESCE(c.name, ''), a.title,
 		       a.description, a.purpose, a.duration_minutes, a.total_marks, a.status,
 		       a.opens_at, a.closes_at, a.max_attempts, a.created_at,
-		       (SELECT COUNT(*) FROM attempts at WHERE at.assessment_id = a.id)
+		       (SELECT COUNT(*) FROM attempts at WHERE at.assessment_id = a.id),
+		       a.course_ids,
+		       -- Questions per attempt: a random-draw section contributes its
+		       -- draw size, a fixed one its question list.
+		       COALESCE((SELECT SUM(COALESCE(s.pick_count,
+		                   (SELECT COUNT(*) FROM section_questions sq WHERE sq.section_id = s.id)))
+		                 FROM assessment_sections s WHERE s.assessment_id = a.id), 0)::int
 		FROM   assessments a
 		LEFT   JOIN companies c ON c.id = a.company_id
 		%s
@@ -296,12 +334,15 @@ func (r *Repo) ListAssessments(ctx context.Context, req *assessmentv1.ListAssess
 	for rows.Next() {
 		a := &assessmentv1.Assessment{}
 		var opensAt, closesAt, createdAt *time.Time
+		courseIDs := []string{}
 		if err := rows.Scan(&a.Id, &a.CompanyId, &a.CompanyName, &a.Title, &a.Description,
 			&a.Purpose, &a.DurationMinutes, &a.TotalMarks, &a.Status,
-			&opensAt, &closesAt, &a.MaxAttempts, &createdAt, &a.AttemptCount); err != nil {
+			&opensAt, &closesAt, &a.MaxAttempts, &createdAt, &a.AttemptCount,
+			&courseIDs, &a.QuestionCount); err != nil {
 			return nil, fmt.Errorf("scan assessment: %w", err)
 		}
 		a.OpensAt, a.ClosesAt, a.CreatedAt = fmtTime(opensAt), fmtTime(closesAt), fmtTime(createdAt)
+		a.CourseIds = &courseIDs
 		out.Assessments = append(out.Assessments, a)
 	}
 	return out, rows.Err()
@@ -454,12 +495,12 @@ func (r *Repo) UpsertSection(ctx context.Context, req *assessmentv1.UpsertSectio
 		err := r.pool.QueryRow(ctx, `
 			INSERT INTO assessment_sections (assessment_id, title, kind, order_index,
 				duration_minutes, cutoff_marks, pick_count, pick_topic, pick_difficulty,
-				pick_marks, partial_credit)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+				pick_marks, partial_credit, pick_course)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			RETURNING id
 		`, s.AssessmentId, defaultStr(s.Title, "Section"), s.Kind, s.OrderIndex, duration,
 			s.CutoffMarks, pickCount, s.PickTopic, s.PickDifficulty,
-			maxInt32(s.PickMarks, 1), s.PartialCredit).Scan(&id)
+			maxInt32(s.PickMarks, 1), s.PartialCredit, s.PickCourse).Scan(&id)
 		if err != nil {
 			return "", fmt.Errorf("insert section: %w", err)
 		}
@@ -470,11 +511,11 @@ func (r *Repo) UpsertSection(ctx context.Context, req *assessmentv1.UpsertSectio
 		UPDATE assessment_sections SET
 			title = $2, kind = $3, order_index = $4, duration_minutes = $5,
 			cutoff_marks = $6, pick_count = $7, pick_topic = $8, pick_difficulty = $9,
-			pick_marks = $10, partial_credit = $11
+			pick_marks = $10, partial_credit = $11, pick_course = $12
 		WHERE id = $1
 	`, id, defaultStr(s.Title, "Section"), s.Kind, s.OrderIndex, duration,
 		s.CutoffMarks, pickCount, s.PickTopic, s.PickDifficulty,
-		maxInt32(s.PickMarks, 1), s.PartialCredit)
+		maxInt32(s.PickMarks, 1), s.PartialCredit, s.PickCourse)
 	if err != nil {
 		return "", fmt.Errorf("update section: %w", err)
 	}
@@ -500,12 +541,40 @@ func (r *Repo) DeleteSection(ctx context.Context, id string) error {
 // the builder saves a drag-reordered list in one round trip.
 func (r *Repo) SetSectionQuestions(ctx context.Context, req *assessmentv1.SetSectionQuestionsRequest) error {
 	var kind string
-	err := r.pool.QueryRow(ctx, `SELECT kind FROM assessment_sections WHERE id = $1`, req.SectionId).Scan(&kind)
+	var companyID *string
+	err := r.pool.QueryRow(ctx, `
+		SELECT s.kind, a.company_id::text
+		FROM   assessment_sections s JOIN assessments a ON a.id = s.assessment_id
+		WHERE  s.id = $1
+	`, req.SectionId).Scan(&kind, &companyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("lookup section kind: %w", err)
+	}
+
+	// A company's test may use its own questions and the platform bank, never
+	// another company's — the same rule drawFromBank applies to random draws.
+	if companyID != nil {
+		var ids []string
+		for _, q := range req.Questions {
+			if q.McqQuestionId != "" {
+				ids = append(ids, q.McqQuestionId)
+			}
+		}
+		if len(ids) > 0 {
+			var foreign int
+			if err := r.pool.QueryRow(ctx, `
+				SELECT COUNT(*) FROM mcq_questions
+				WHERE  id::text = ANY($1) AND company_id IS NOT NULL AND company_id::text <> $2
+			`, ids, *companyID).Scan(&foreign); err != nil {
+				return fmt.Errorf("check question ownership: %w", err)
+			}
+			if foreign > 0 {
+				return fmt.Errorf("%d question(s) belong to another company's bank", foreign)
+			}
+		}
 	}
 
 	// A coding section must hold problem references and an MCQ/descriptive

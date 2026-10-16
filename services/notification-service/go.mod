@@ -1,4 +1,4 @@
-module github.com/skillofide/notification-service
+module github.com/knovate211/notification-service
 
 go 1.22
 

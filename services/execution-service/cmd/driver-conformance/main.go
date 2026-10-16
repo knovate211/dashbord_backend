@@ -32,8 +32,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/skillofide/execution-service/internal/codegen"
-	"github.com/skillofide/execution-service/internal/sandbox"
+	"github.com/knovate211/execution-service/internal/codegen"
+	"github.com/knovate211/execution-service/internal/sandbox"
 )
 
 // echoCase is one type and a value that exercises it. Values are chosen to

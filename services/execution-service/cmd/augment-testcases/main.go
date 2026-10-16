@@ -27,8 +27,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/execution-service/internal/codegen"
-	"github.com/skillofide/execution-service/internal/sandbox"
+	"github.com/knovate211/execution-service/internal/codegen"
+	"github.com/knovate211/execution-service/internal/sandbox"
 )
 
 // spec is the authored half: which problem, and what inputs to add.

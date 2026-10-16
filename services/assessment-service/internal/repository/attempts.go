@@ -14,8 +14,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/skillofide/assessment-service/internal/grading"
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	"github.com/knovate211/assessment-service/internal/grading"
+	"github.com/knovate211/pkg/ids"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // ErrAttemptClosed is returned by every write path once an attempt is no
@@ -50,6 +51,7 @@ type attemptCtx struct {
 	IntegrityScore  float64
 	Title           string
 	AllowBacktrack  bool
+	LockForward     bool
 	RevealResults   bool
 	NegativeMarking float64
 	PassingMarks    float64
@@ -112,7 +114,12 @@ func (r *Repo) ListAvailableAssessments(ctx context.Context, req *assessmentv1.L
 		       ON i.assessment_id = a.id AND lower(i.email) = lower($2)
 		WHERE  a.status = 'published'
 		  AND  (a.purpose = 'practice' OR i.id IS NOT NULL)
-		ORDER  BY (a.purpose IN ('hiring', 'scholarship')) DESC, a.created_at DESC
+		  -- A practice test aimed at particular courses is shown only to
+		  -- students enrolled in one of them (see practiceAudienceOK).
+		  AND  (a.purpose <> 'practice' OR cardinality(a.course_ids) = 0
+		        OR EXISTS (SELECT 1 FROM user_courses uc
+		                   WHERE uc.user_id = $1 AND uc.course_id = ANY(a.course_ids)))
+		ORDER  BY (a.purpose IN ('hiring', 'scholarship', 'certification')) DESC, a.created_at DESC
 	`, req.UserId, email)
 	if err != nil {
 		return nil, fmt.Errorf("list available assessments: %w", err)
@@ -229,6 +236,13 @@ func (r *Repo) StartAttempt(ctx context.Context, req *assessmentv1.StartAttemptR
 		return "", fmt.Errorf("this test has closed")
 	}
 
+	// Course audience for practice tests. The listing hides a test from
+	// students outside its courses; this stops the same test being started by
+	// id or a shared link.
+	if err := r.practiceAudienceOK(ctx, a, req.UserId); err != nil {
+		return "", err
+	}
+
 	// Invite check for hiring drives.
 	inviteID, err := r.resolveInvite(ctx, a, req)
 	if err != nil {
@@ -340,12 +354,40 @@ func initialGradingStatus(kind string) string {
 // pre-empts that decision and — when coding answers are still grading — shows a
 // zero that is simply wrong.
 //
-// Unlike inviteOnly this is an allowlist of one, and that is the right way
-// round here: a purpose nobody has thought about should show results normally
-// (the existing behaviour for practice and hiring), not silently stop showing
-// them.
+// A hiring result is the company's to act on, the same way: the candidate
+// hears back from the hiring team, not from a percentage on screen the moment
+// they submit (which, with coding still grading, is often wrong anyway).
+//
+// Unlike inviteOnly this is an allowlist, and that is the right way round
+// here: a purpose nobody has thought about should show results normally (the
+// behaviour practice relies on), not silently stop showing them.
 func resultsWithheld(purpose string) bool {
-	return strings.EqualFold(strings.TrimSpace(purpose), "scholarship")
+	p := strings.ToLower(strings.TrimSpace(purpose))
+	// Certification is deliberately absent: a candidate who paid to sit an exam
+	// is told whether they passed and what they scored. The question-by-question
+	// breakdown is still governed by the paper's reveal_results flag, so the
+	// bank stays protected.
+	return p == "scholarship" || p == "hiring"
+}
+
+// practiceAudienceOK allows a practice test with no course list to everyone,
+// and one with a course list only to students enrolled in one of its courses.
+func (r *Repo) practiceAudienceOK(ctx context.Context, a *assessmentv1.Assessment, userID string) error {
+	if inviteOnly(a.Purpose) || a.CourseIds == nil || len(*a.CourseIds) == 0 {
+		return nil
+	}
+	var ok bool
+	if ids.IsUUID(userID) {
+		if err := r.pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = ANY($2))
+		`, userID, *a.CourseIds).Scan(&ok); err != nil {
+			return fmt.Errorf("check course enrolment: %w", err)
+		}
+	}
+	if !ok {
+		return fmt.Errorf("this test is only open to students of its course")
+	}
+	return nil
 }
 
 func inviteOnly(purpose string) bool {
@@ -500,6 +542,13 @@ func (r *Repo) drawFromBank(ctx context.Context, companyID string, s *assessment
 	} else {
 		clauses = append(clauses, "company_id IS NULL")
 	}
+	switch s.PickCourse {
+	case "": // any course
+	case assessmentv1.McqGeneralCourse:
+		clauses = append(clauses, "course_id = ''")
+	default:
+		add("course_id = $%d", s.PickCourse)
+	}
 	if s.PickTopic != "" {
 		add("topic = $%d", s.PickTopic)
 	}
@@ -627,14 +676,14 @@ func (r *Repo) loadAttempt(ctx context.Context, q querier, attemptID string, loc
 	err := q.QueryRow(ctx, `
 		SELECT at.id::text, at.assessment_id::text, at.user_id::text, at.status, at.seed,
 		       at.started_at, at.expires_at, at.max_score, at.score, at.integrity_score,
-		       a.title, a.allow_backtrack, a.reveal_results, a.negative_marking,
+		       a.title, a.allow_backtrack, a.lock_forward, a.reveal_results, a.negative_marking,
 		       a.passing_marks, a.purpose, a.proctoring
 		FROM   attempts at
 		JOIN   assessments a ON a.id = at.assessment_id
 		WHERE  at.id = $1`+suffix, attemptID).
 		Scan(&a.ID, &a.AssessmentID, &a.UserID, &a.Status, &a.Seed,
 			&a.StartedAt, &a.ExpiresAt, &a.MaxScore, &a.Score, &a.IntegrityScore,
-			&a.Title, &a.AllowBacktrack, &a.RevealResults, &a.NegativeMarking,
+			&a.Title, &a.AllowBacktrack, &a.LockForward, &a.RevealResults, &a.NegativeMarking,
 			&a.PassingMarks, &a.Purpose, &proctoring)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -677,6 +726,7 @@ func (r *Repo) GetAttemptState(ctx context.Context, attemptID, userID string) (*
 		Title:           a.Title,
 		Status:          a.Status,
 		AllowBacktrack:  a.AllowBacktrack,
+		LockForward:     a.LockForward,
 		Proctoring:      a.Proctoring,
 		ServerNow:       now.Format(time.RFC3339),
 		ExpiresAt:       a.ExpiresAt.UTC().Format(time.RFC3339),
@@ -838,23 +888,37 @@ func (r *Repo) SaveAnswer(ctx context.Context, req *assessmentv1.SaveAnswerReque
 	if err != nil {
 		return 0, fmt.Errorf("lookup attempt question: %w", err)
 	}
+
+	// On a sequential paper the client only ever shows the candidate a question
+	// whose predecessors are done, but the client is not the authority: a
+	// hand-rolled request could otherwise write an answer for a question the
+	// candidate was never meant to have reached.
+	if a.LockForward {
+		if err := r.requireEarlierAnswered(ctx, req.AttemptId, orderIndex); err != nil {
+			return 0, err
+		}
+	}
+
 	// A coding question saves a draft, not an answer: the editor's contents are
 	// stored verbatim and nothing is graded. Grading still only happens through
 	// SubmitAttemptCode, so this cannot be used to sneak an ungraded run past
 	// the judge — but it does mean a candidate who navigates away, refreshes or
 	// crashes keeps the code they had written.
 	if kind == "coding" {
-		if _, err := r.pool.Exec(ctx, `
+		tag, err := r.pool.Exec(ctx, `
 			UPDATE attempt_questions SET
 				language      = COALESCE(NULLIF($3, ''), language),
 				code          = $4,
 				marked_review = $5,
 				visited       = true,
 				time_spent_ms = time_spent_ms + GREATEST($6, 0)
-			WHERE id = $1 AND attempt_id = $2
-		`, req.QuestionId, req.AttemptId, req.Language, req.Code,
-			req.MarkedReview, req.TimeSpentMs); err != nil {
+			WHERE id = $1 AND attempt_id = $2 AND `+stillLive, req.QuestionId, req.AttemptId, req.Language, req.Code,
+			req.MarkedReview, req.TimeSpentMs)
+		if err != nil {
 			return 0, fmt.Errorf("save coding draft: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return 0, ErrAttemptClosed
 		}
 		return a.secondsLeft(time.Now().UTC()), nil
 	}
@@ -880,20 +944,58 @@ func (r *Repo) SaveAnswer(ctx context.Context, req *assessmentv1.SaveAnswerReque
 		selected = []string{}
 	}
 
-	_, err = r.pool.Exec(ctx, `
+	tag, err := r.pool.Exec(ctx, `
 		UPDATE attempt_questions SET
 			selected_options = $3::uuid[],
 			text_answer      = CASE WHEN $4 THEN NULL ELSE $5 END,
 			marked_review    = $6,
 			visited          = true,
 			time_spent_ms    = time_spent_ms + GREATEST($7, 0)
-		WHERE id = $1 AND attempt_id = $2
-	`, req.QuestionId, req.AttemptId, selected, req.ClearAnswer, req.TextAnswer,
+		WHERE id = $1 AND attempt_id = $2 AND `+stillLive, req.QuestionId, req.AttemptId, selected, req.ClearAnswer, req.TextAnswer,
 		req.MarkedReview, req.TimeSpentMs)
 	if err != nil {
 		return 0, fmt.Errorf("save answer: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return 0, ErrAttemptClosed
+	}
 	return a.secondsLeft(time.Now().UTC()), nil
+}
+
+// stillLive is appended to every write that changes an answer. The liveness
+// check in requireLiveAttempt runs before the write, so without this a save
+// arriving while FinalizeAttempt is grading would land after the marks were
+// counted and never be scored — likeliest in a test's last seconds, when every
+// candidate's autosave and the deadline sweep coincide.
+//
+// FOR SHARE conflicts with the FOR UPDATE lock FinalizeAttempt takes on the
+// attempt: a save either commits first and is graded, or waits, sees the
+// attempt closed, and changes nothing. Parameter $2 must be the attempt id.
+const stillLive = `EXISTS (SELECT 1 FROM attempts WHERE id = $2 AND status = 'in_progress' FOR SHARE)`
+
+// requireEarlierAnswered enforces a lock_forward paper's rule: every question
+// before orderIndex must already be answered.
+//
+// "Answered" matches what the player's palette shows as answered — a committed
+// selection or text for an MCQ or descriptive question, a judged submission for
+// a coding one. A saved coding draft deliberately does not count: writing code
+// into the editor is not solving the question.
+func (r *Repo) requireEarlierAnswered(ctx context.Context, attemptID string, orderIndex int32) error {
+	var pending int32
+	if err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(MIN(order_index), -1) FROM attempt_questions
+		WHERE  attempt_id = $1 AND order_index < $2
+		  AND  CASE WHEN kind = 'coding' THEN submission_id IS NULL
+		            ELSE cardinality(selected_options) = 0
+		                 AND COALESCE(btrim(text_answer), '') = ''
+		       END
+	`, attemptID, orderIndex).Scan(&pending); err != nil {
+		return fmt.Errorf("check sequential lock: %w", err)
+	}
+	if pending >= 0 {
+		return fmt.Errorf("answer question %d before moving on", pending+1)
+	}
+	return nil
 }
 
 // requireLiveAttempt is the single gate every write path goes through: right
@@ -922,18 +1024,27 @@ func (r *Repo) requireLiveAttempt(ctx context.Context, attemptID, userID string)
 // AttemptCodingQuestion validates that a coding question belongs to this live
 // attempt and returns the problem id to grade against.
 func (r *Repo) AttemptCodingQuestion(ctx context.Context, attemptID, userID, questionID string) (problemID string, err error) {
-	if _, err := r.requireLiveAttempt(ctx, attemptID, userID); err != nil {
+	a, err := r.requireLiveAttempt(ctx, attemptID, userID)
+	if err != nil {
 		return "", err
 	}
+	var orderIndex int32
 	err = r.pool.QueryRow(ctx, `
-		SELECT COALESCE(problem_id::text, '') FROM attempt_questions
+		SELECT COALESCE(problem_id::text, ''), order_index FROM attempt_questions
 		WHERE id = $1 AND attempt_id = $2 AND kind = 'coding'
-	`, questionID, attemptID).Scan(&problemID)
+	`, questionID, attemptID).Scan(&problemID, &orderIndex)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", fmt.Errorf("lookup coding question: %w", err)
+	}
+	// Running the judge is how a coding question gets answered, so it is also
+	// where a sequential paper has to be enforced.
+	if a.LockForward {
+		if err := r.requireEarlierAnswered(ctx, attemptID, orderIndex); err != nil {
+			return "", err
+		}
 	}
 	if problemID == "" {
 		return "", fmt.Errorf("this question has no problem attached")
@@ -958,13 +1069,16 @@ func (r *Repo) RecordCodeSubmission(ctx context.Context, attemptID, questionID, 
 		return 0, fmt.Errorf("insert attempt submission: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE attempt_questions
 		SET    submission_id = $3, language = $4, code = $5,
 		       grading_status = 'pending', visited = true
-		WHERE  id = $1 AND attempt_id = $2
-	`, questionID, attemptID, submissionID, language, code); err != nil {
+		WHERE  id = $1 AND attempt_id = $2 AND `+stillLive, questionID, attemptID, submissionID, language, code)
+	if err != nil {
 		return 0, fmt.Errorf("mark question pending: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, ErrAttemptClosed
 	}
 
 	if err := tx.Commit(ctx); err != nil {

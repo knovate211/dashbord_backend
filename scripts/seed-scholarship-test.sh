@@ -40,6 +40,11 @@ PASSING=${PASSING:-40}            # = the lowest award slab, 40/100
 NEGATIVE=${NEGATIVE:-0}           # a screen should not punish attempting
 TAB_LIMIT=${TAB_LIMIT:-5}
 
+# The paper is sequential: a candidate sees one question at a time and the next
+# only unlocks once the current one is answered (a judged submission, for the
+# coding half). Backtracking stays on, so a committed answer can still be
+# revised — the lock is about not reading ahead, not about finality.
+
 # score% → scholarship%
 SLABS=${SLABS:-'[{"minPercent":80,"awardPercent":100},{"minPercent":65,"awardPercent":50},{"minPercent":50,"awardPercent":25}]'}
 
@@ -119,6 +124,7 @@ ASSESSMENT=$(curl -fsS -X POST "${AUTH[@]}" "$API/api/recruiter/assessments" -d 
   \"shuffle_questions\": true,
   \"shuffle_options\": true,
   \"allow_backtrack\": true,
+  \"lock_forward\": true,
   \"reveal_results\": true,
   \"max_attempts\": 1,
   \"proctoring\": {\"require_fullscreen\": true, \"tab_switch_limit\": $TAB_LIMIT, \"block_copy_paste\": true, \"webcam\": false}

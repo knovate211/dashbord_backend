@@ -3,7 +3,7 @@ package generated
 import (
 	"github.com/graphql-go/graphql"
 
-	"github.com/skillofide/api-gateway/graph/resolvers"
+	"github.com/knovate211/api-gateway/graph/resolvers"
 )
 
 // resolversAssessment keeps the field-builder signatures below readable.
@@ -104,6 +104,7 @@ var attemptStateType = graphql.NewObject(graphql.ObjectConfig{
 		"title":          &graphql.Field{Type: graphql.String},
 		"status":         &graphql.Field{Type: graphql.String},
 		"allowBacktrack": &graphql.Field{Type: graphql.Boolean},
+		"lockForward":    &graphql.Field{Type: graphql.Boolean},
 		"proctoring":     &graphql.Field{Type: proctoringType},
 		// serverNow and secondsLeft are the authoritative clock; the client's
 		// own time is display-only.

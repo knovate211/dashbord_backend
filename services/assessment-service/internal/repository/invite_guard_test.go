@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 )
 
 // TestInviteOnly pins down who may sit which kind of paper.

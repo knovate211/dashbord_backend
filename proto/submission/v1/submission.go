@@ -16,6 +16,9 @@ type SubmitRequest struct {
 	Language  string `json:"language"`
 	Code      string `json:"code"`
 	UserId    string `json:"user_id"`
+	// Source is "assessment" when a timed test submits on the candidate's
+	// behalf. Such submissions are scored by the test, not by practice XP.
+	Source string `json:"source,omitempty"`
 }
 
 type SubmitResponse struct {
@@ -35,6 +38,7 @@ type TestResult struct {
 	ExecutionMs    int64  `json:"execution_ms"`
 	MemoryKb       int64  `json:"memory_kb"`
 	Error          string `json:"error,omitempty"`
+	IsHidden       bool   `json:"is_hidden,omitempty"`
 }
 
 type Submission struct {

@@ -16,17 +16,17 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
-	pkgdb "github.com/skillofide/pkg/database"
-	pkglog "github.com/skillofide/pkg/logger"
-	assessmentv1 "github.com/skillofide/proto/assessment/v1"
-	"github.com/skillofide/proto/codec" // register JSON codec
-	executionv1 "github.com/skillofide/proto/execution/v1"
-	submissionv1 "github.com/skillofide/proto/submission/v1"
+	pkgdb "github.com/knovate211/pkg/database"
+	pkglog "github.com/knovate211/pkg/logger"
+	assessmentv1 "github.com/knovate211/proto/assessment/v1"
+	"github.com/knovate211/proto/codec" // register JSON codec
+	executionv1 "github.com/knovate211/proto/execution/v1"
+	submissionv1 "github.com/knovate211/proto/submission/v1"
 
-	"github.com/skillofide/assessment-service/internal/consumer"
-	"github.com/skillofide/assessment-service/internal/handler"
-	"github.com/skillofide/assessment-service/internal/repository"
-	"github.com/skillofide/assessment-service/internal/sweeper"
+	"github.com/knovate211/assessment-service/internal/consumer"
+	"github.com/knovate211/assessment-service/internal/handler"
+	"github.com/knovate211/assessment-service/internal/repository"
+	"github.com/knovate211/assessment-service/internal/sweeper"
 )
 
 func main() {

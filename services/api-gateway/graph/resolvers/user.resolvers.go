@@ -6,8 +6,8 @@ import (
 	"github.com/graphql-go/graphql"
 	"go.uber.org/zap"
 
-	"github.com/skillofide/api-gateway/middleware"
-	userv1 "github.com/skillofide/proto/user/v1"
+	"github.com/knovate211/api-gateway/middleware"
+	userv1 "github.com/knovate211/proto/user/v1"
 )
 
 // UserClients holds the gRPC clients for user resolvers.
