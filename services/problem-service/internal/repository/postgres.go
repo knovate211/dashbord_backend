@@ -137,15 +137,19 @@ func (r *ProblemRepository) GetProblem(ctx context.Context, req *problemv1.GetPr
 
 	// Either key is indexed; compare the uuid column only when the value can
 	// be one, since Postgres errors on a slug cast to uuid.
+	// The uuid comparison takes its own parameter: reusing $1 for both would
+	// type it as uuid and turn "slug = $1" into an invalid text = uuid.
 	where := "slug = $1"
+	args := []any{req.Id}
 	if ids.IsUUID(req.Id) {
-		where = "id = $1::uuid OR slug = $1"
+		where = "id = $2::uuid OR slug = $1"
+		args = append(args, req.Id)
 	}
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, slug, title, difficulty, topic, xp, statement,
 		       COALESCE(set_id::text, '') AS set_id, io_mode, is_private
 		FROM   problems
-		WHERE  `+where, req.Id).Scan(&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode, &p.IsPrivate)
+		WHERE  `+where, args...).Scan(&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode, &p.IsPrivate)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("problem not found: %s", req.Id)

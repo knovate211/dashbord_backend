@@ -235,6 +235,17 @@ func main() {
 			log.Info("attendance registered at /api/attendance/")
 		}
 
+		// How far each learner has read through each course, so progress
+		// follows them across devices instead of living in one browser.
+		courseProgressHandler, err := resolvers.NewCourseProgressHandler(context.Background(), adminPool, log)
+		if err != nil {
+			log.Error("course progress handler init failed — course progress disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/course-progress", courseProgressHandler)
+			mux.Handle("/api/course-progress/", courseProgressHandler)
+			log.Info("course progress registered at /api/course-progress")
+		}
+
 		// The referral programme. Creating a link and opening one are public —
 		// a referrer may have no account and their friend certainly does not.
 		referralHandler, err := resolvers.NewReferralHandler(
