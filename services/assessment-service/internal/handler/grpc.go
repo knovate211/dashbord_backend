@@ -220,6 +220,10 @@ func (h *Handler) RunAttemptCode(ctx context.Context, req *assessmentv1.RunAttem
 		UserId:    req.UserId,
 	})
 	if err != nil {
+		// "Busy" is worded for the candidate and tells them what to do; pass it on.
+		if status.Code(err) == codes.ResourceExhausted {
+			return nil, err
+		}
 		h.log.Error("run attempt code failed", zap.Error(err))
 		return nil, status.Error(codes.Internal, "could not run your code, please try again")
 	}

@@ -123,7 +123,7 @@ func main() {
 			Log:     log,
 			Pool:    adminPool,
 		},
-		Jobs: resolvers.NewJobClients(),
+		Jobs: resolvers.NewJobClients(log),
 		Assessments: &resolvers.AssessmentClients{
 			AssessmentSvc: assessmentSvcClient,
 			Log:           log,

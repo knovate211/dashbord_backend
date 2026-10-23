@@ -126,8 +126,11 @@ services:
       EXEC_STARTUP_GRACE_MS: ${EXEC_STARTUP_GRACE_MS:-3000}
       # How many sandboxed runs may execute at once. Each is pinned to one CPU,
       # so oversubscribing does not add throughput — it makes every run slow
-      # enough to fail its time limit. Defaults to CPUs-2.
+      # enough to fail its time limit. Defaults to CPUs/2.
       EXEC_MAX_CONCURRENT: ${EXEC_MAX_CONCURRENT:-}
+      # How long a Run waits for a free runner before the learner is told the
+      # runner is busy. Submissions are queued and never wait on this.
+      EXEC_RUN_QUEUE_WAIT_MS: ${EXEC_RUN_QUEUE_WAIT_MS:-}
       PROBLEM_SERVICE_ADDR: problem-service:50051
       NATS_URL: nats://nats:4222
       GRPC_PORT: "50052"

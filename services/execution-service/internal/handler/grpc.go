@@ -3,7 +3,10 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,7 +44,24 @@ func (h *ExecutionHandler) RunCode(ctx context.Context, req *executionv1.RunCode
 	if err := validateRunRequest(req); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	return h.runCases(ctx, req, false)
+	return h.runCases(ctx, req, false, runQueueWait())
+}
+
+// busyMessage is what a learner sees when every runner is taken. It reaches
+// them verbatim through the gateway, so it is worded for them.
+const busyMessage = "The code runner is busy right now. Please try again in a few seconds."
+
+// runQueueWait is how long an interactive Run waits for a free runner before
+// answering "busy" (EXEC_RUN_QUEUE_WAIT_MS, default 15s). Waiting the whole
+// 60-second budget only to fail helped nobody: the learner stared at a spinner
+// and then clicked again, adding to the queue.
+func runQueueWait() time.Duration {
+	if v := os.Getenv("EXEC_RUN_QUEUE_WAIT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 15 * time.Second
 }
 
 // VerifySolution runs code against every test case, hidden ones included. It
@@ -53,7 +73,8 @@ func (h *ExecutionHandler) VerifySolution(ctx context.Context, req *executionv1.
 	if err := validateRunRequest(run); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	return h.runCases(ctx, run, true)
+	// An admin checking a solution waits its turn rather than being turned away.
+	return h.runCases(ctx, run, true, 0)
 }
 
 // GenerateStarters renders the starter template for every supported language
@@ -80,7 +101,7 @@ func (h *ExecutionHandler) GenerateStarters(ctx context.Context, req *executionv
 
 // runCases executes code against a problem's test cases — visible ones only
 // unless includeHidden — and grades each synchronously.
-func (h *ExecutionHandler) runCases(ctx context.Context, req *executionv1.RunCodeRequest, includeHidden bool) (*executionv1.RunCodeResponse, error) {
+func (h *ExecutionHandler) runCases(ctx context.Context, req *executionv1.RunCodeRequest, includeHidden bool, queueWait time.Duration) (*executionv1.RunCodeResponse, error) {
 	tcResp, err := h.probCli.GetTestCases(ctx, &problemv1.GetTestCasesRequest{
 		ProblemId:     req.ProblemId,
 		IncludeHidden: includeHidden,
@@ -107,7 +128,13 @@ func (h *ExecutionHandler) runCases(ctx context.Context, req *executionv1.RunCod
 			TimeLimitMs:   tc.TimeLimitMs,
 			MemoryLimitMb: tc.MemoryLimitMb,
 			Spec:          toSandboxSpec(tcResp.ExecutionSpec),
+			MaxQueueWait:  queueWait,
 		})
+		if errors.Is(err, sandbox.ErrBusy) {
+			// Partial results would read as a verdict; report the whole run as busy.
+			h.log.Warn("run turned away: runners busy", zap.String("problem_id", req.ProblemId))
+			return nil, status.Error(codes.ResourceExhausted, busyMessage)
+		}
 		if err != nil {
 			h.log.Error("sandbox run error", zap.Error(err))
 			tr := &executionv1.TestResult{
@@ -195,7 +222,11 @@ func (h *ExecutionHandler) RunScratchpad(ctx context.Context, req *executionv1.R
 		TimeLimitMs:   5000,
 		MemoryLimitMb: 256,
 		Raw:           true,
+		MaxQueueWait:  runQueueWait(),
 	})
+	if errors.Is(err, sandbox.ErrBusy) {
+		return nil, status.Error(codes.ResourceExhausted, busyMessage)
+	}
 	if err != nil {
 		h.log.Error("scratchpad run failed", zap.Error(err))
 		return nil, status.Errorf(codes.Internal, "run failed: %v", err)

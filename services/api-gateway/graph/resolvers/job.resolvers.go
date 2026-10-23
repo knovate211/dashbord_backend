@@ -3,6 +3,7 @@ package resolvers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,17 @@ import (
 	"time"
 
 	"github.com/graphql-go/graphql"
+	"go.uber.org/zap"
 )
+
+// errJobsUnavailable is what a learner sees when job search cannot run, for
+// whatever reason on our side (missing or rejected key, upstream outage). The
+// reason itself is logged; it means nothing to a student and names our setup.
+// errJobsRateLimited is passed through as is: it is true, and it tells the
+// learner what to do.
+var errJobsRateLimited = errors.New("job search rate limit reached — try again shortly")
+
+var errJobsUnavailable = errors.New("Job listings aren't available right now. Please try again in a little while.")
 
 // JSearch (RapidAPI) aggregates postings from LinkedIn, Indeed, Glassdoor and
 // company boards behind one endpoint. It replaced Careerjet, whose public
@@ -42,6 +53,9 @@ type JobClients struct {
 	mu    sync.Mutex
 	cache map[string]cachedJobs
 	now   func() time.Time
+
+	log           *zap.Logger
+	notConfigured sync.Once
 }
 
 type cachedJobs struct {
@@ -49,7 +63,7 @@ type cachedJobs struct {
 	result map[string]interface{}
 }
 
-func NewJobClients() *JobClients {
+func NewJobClients(log *zap.Logger) *JobClients {
 	return &JobClients{
 		// RapidAPI key. Without it the resolver returns a clear setup error
 		// rather than an opaque 401 from upstream.
@@ -58,6 +72,7 @@ func NewJobClients() *JobClients {
 		http:     &http.Client{Timeout: 60 * time.Second},
 		cache:    map[string]cachedJobs{},
 		now:      time.Now,
+		log:      log,
 	}
 }
 
@@ -117,7 +132,10 @@ type jsearchJob struct {
 // SearchJobs queries JSearch and maps its payload onto the Job GraphQL type.
 func (c *JobClients) SearchJobs(p graphql.ResolveParams) (interface{}, error) {
 	if c.apiKey == "" {
-		return nil, fmt.Errorf("job search is not configured: set JSEARCH_API_KEY to a RapidAPI key subscribed to JSearch")
+		c.notConfigured.Do(func() {
+			c.log.Warn("job search is not configured: set JSEARCH_API_KEY to a RapidAPI key subscribed to JSearch")
+		})
+		return nil, errJobsUnavailable
 	}
 
 	keywords, _ := p.Args["keywords"].(string)
@@ -143,7 +161,11 @@ func (c *JobClients) SearchJobs(p graphql.ResolveParams) (interface{}, error) {
 	}
 	result, err := c.fetch(p.Context, query, page)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, errJobsRateLimited) {
+			return nil, err
+		}
+		c.log.Error("job search failed", zap.String("query", query), zap.Error(err))
+		return nil, errJobsUnavailable
 	}
 	c.store(key, result)
 	return result, nil
@@ -184,7 +206,7 @@ func (c *JobClients) fetch(ctx context.Context, query string, page int) (map[str
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return nil, fmt.Errorf("job search rejected the API key — check JSEARCH_API_KEY and that the RapidAPI account is subscribed to JSearch")
 		case http.StatusTooManyRequests:
-			return nil, fmt.Errorf("job search rate limit reached — try again shortly")
+			return nil, errJobsRateLimited
 		default:
 			return nil, fmt.Errorf("job search returned status %d", resp.StatusCode)
 		}

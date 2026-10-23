@@ -4,11 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/graphql-go/graphql"
+	"go.uber.org/zap"
 )
 
 func TestJobSearchReusesRecentResults(t *testing.T) {
@@ -20,7 +22,7 @@ func TestJobSearchReusesRecentResults(t *testing.T) {
 	defer srv.Close()
 
 	clock := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
-	c := NewJobClients()
+	c := NewJobClients(zap.NewNop())
 	c.apiKey, c.endpoint = "test", srv.URL
 	c.now = func() time.Time { return clock }
 
@@ -57,7 +59,7 @@ func TestJobSearchDoesNotCacheFailures(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewJobClients()
+	c := NewJobClients(zap.NewNop())
 	c.apiKey, c.endpoint = "test", srv.URL
 	args := map[string]interface{}{"keywords": "Go", "page": 1}
 	for i := 0; i < 2; i++ {
@@ -67,5 +69,40 @@ func TestJobSearchDoesNotCacheFailures(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("a failed search was served from cache; calls = %d", got)
+	}
+}
+
+// Learners never see our configuration: a missing key or a broken upstream
+// gives the same friendly message; a rate limit still tells them to wait.
+func TestJobSearchErrorsAreStudentSafe(t *testing.T) {
+	args := map[string]interface{}{"keywords": "Go", "page": 1}
+	search := func(c *JobClients) error {
+		_, err := c.SearchJobs(graphql.ResolveParams{Context: context.Background(), Args: args})
+		return err
+	}
+
+	unconfigured := NewJobClients(zap.NewNop())
+	unconfigured.apiKey = ""
+	if err := search(unconfigured); err != errJobsUnavailable {
+		t.Fatalf("missing key: got %v", err)
+	}
+
+	for status, want := range map[int]error{
+		http.StatusForbidden:           errJobsUnavailable,
+		http.StatusInternalServerError: errJobsUnavailable,
+		http.StatusTooManyRequests:     errJobsRateLimited,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+		c := NewJobClients(zap.NewNop())
+		c.apiKey, c.endpoint = "test", srv.URL
+		if err := search(c); err != want {
+			t.Errorf("status %d: got %v, want %v", status, err, want)
+		}
+		srv.Close()
+	}
+	for _, e := range []error{errJobsUnavailable, errJobsRateLimited} {
+		if strings.Contains(e.Error(), "JSEARCH") || strings.Contains(e.Error(), "API key") {
+			t.Errorf("message names our configuration: %q", e)
+		}
 	}
 }
