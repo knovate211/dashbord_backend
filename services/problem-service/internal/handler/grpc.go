@@ -3,6 +3,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -58,9 +59,14 @@ func (h *ProblemHandler) GetProblem(ctx context.Context, req *problemv1.GetProbl
 	}
 
 	p, err := h.repo.GetProblem(ctx, req)
-	if err != nil {
-		h.logger.Error("get problem failed", zap.String("id", req.Id), zap.Error(err))
+	if errors.Is(err, repository.ErrProblemNotFound) {
 		return nil, status.Errorf(codes.NotFound, "problem not found: %s", req.Id)
+	}
+	if err != nil {
+		// A failed lookup is not a missing problem: report it as such, so the
+		// caller can tell a deleted problem from a database hiccup.
+		h.logger.Error("get problem failed", zap.String("id", req.Id), zap.Error(err))
+		return nil, status.Error(codes.Internal, "could not load the problem")
 	}
 
 	if err := h.cache.SetProblem(ctx, p); err != nil {
@@ -68,6 +74,18 @@ func (h *ProblemHandler) GetProblem(ctx context.Context, req *problemv1.GetProbl
 	}
 
 	return p, nil
+}
+
+// InvalidateProblem drops the cached copies of a problem. The admin screens in
+// the API gateway write problems straight to the database, so without this an
+// edit stayed invisible, and a deleted problem kept being served, for up to the
+// cache TTL.
+func (h *ProblemHandler) InvalidateProblem(ctx context.Context, req *problemv1.InvalidateProblemRequest) (*problemv1.InvalidateProblemResponse, error) {
+	if req.Id == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	h.cache.InvalidateProblem(ctx, req.Id, req.Slug)
+	return &problemv1.InvalidateProblemResponse{}, nil
 }
 
 // GetTestCases returns test cases for a problem.

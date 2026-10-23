@@ -2,7 +2,6 @@ package resolvers
 
 import (
 	"bytes"
-	"html/template"
 	"time"
 )
 
@@ -34,13 +33,7 @@ func hiringInviteHTML(name, company, testTitle, testURL string, duration, totalM
 	return buf.String()
 }
 
-var hiringInviteTemplate = template.Must(template.New("hiring").Parse(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:{{.Cream}};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{{.Cream}};padding:24px 12px;">
-<tr><td align="center">
-  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid {{.Border}};border-radius:10px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
-
+var hiringInviteTemplate = brandedEmail("hiring", `
     <tr><td style="background:{{.Ink}};padding:26px 32px;">
       <div style="color:#ffffff;font-size:21px;font-weight:700;line-height:1.3;">{{.Company}} — Online Assessment</div>
       <div style="color:#b9b1a4;font-size:13px;padding-top:5px;">Powered by Knovate</div>
@@ -74,7 +67,4 @@ var hiringInviteTemplate = template.Must(template.New("hiring").Parse(`<!DOCTYPE
       This link is personal to you — please do not share it.
     </td></tr>
 
-  </table>
-</td></tr>
-</table>
-</body></html>`))
+`)

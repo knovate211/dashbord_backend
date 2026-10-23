@@ -216,7 +216,7 @@ func (h *AttendanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
@@ -228,7 +228,7 @@ func (h *AttendanceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/history" && r.Method == http.MethodGet:
 		h.history(w, r, userID)
 	default:
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -347,19 +347,19 @@ func (h *AttendanceHandler) today(w http.ResponseWriter, r *http.Request, userID
 	schedules, err := h.studentSchedules(r.Context(), userID)
 	if err != nil {
 		h.Log.Error("load schedules failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load today's classes")
+		writeErr(w, http.StatusInternalServerError, "could not load today's classes")
 		return
 	}
 	marked, err := h.markedIn(r.Context(), userID, date, date)
 	if err != nil {
 		h.Log.Error("load attendance failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load today's classes")
+		writeErr(w, http.StatusInternalServerError, "could not load today's classes")
 		return
 	}
 	sessions := expand(schedules, day, day, now, marked)
 	// The pop-up reads in time order.
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].StartsAt < sessions[j].StartsAt })
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"sessions":    nonNil(sessions),
 		"server_time": now.In(classTZ).Format(time.RFC3339),
 	})
@@ -372,7 +372,7 @@ func (h *AttendanceHandler) mark(w http.ResponseWriter, r *http.Request, userID 
 		ScheduleID string `json:"schedule_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil || body.ScheduleID == "" {
-		h.fail(w, http.StatusBadRequest, "schedule_id is required")
+		writeErr(w, http.StatusBadRequest, "schedule_id is required")
 		return
 	}
 
@@ -383,17 +383,17 @@ func (h *AttendanceHandler) mark(w http.ResponseWriter, r *http.Request, userID 
 		  AND  EXISTS (SELECT 1 FROM user_courses uc WHERE uc.user_id = $2::uuid AND uc.course_id = c.course_id)
 	`, body.ScheduleID, userID))
 	if errors.Is(err, pgx.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "invalid input syntax")) {
-		h.fail(w, http.StatusNotFound, "class not found")
+		writeErr(w, http.StatusNotFound, "class not found")
 		return
 	}
 	if err != nil {
 		h.Log.Error("load schedule for mark failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not mark attendance")
+		writeErr(w, http.StatusInternalServerError, "could not mark attendance")
 		return
 	}
 
 	if code, msg := checkMarkWindow(s, h.now()); code != 0 {
-		h.fail(w, code, msg)
+		writeErr(w, code, msg)
 		return
 	}
 
@@ -416,10 +416,10 @@ func (h *AttendanceHandler) mark(w http.ResponseWriter, r *http.Request, userID 
 	`, s.ID, userID, date).Scan(&markedAt)
 	if err != nil {
 		h.Log.Error("mark attendance failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not mark attendance")
+		writeErr(w, http.StatusInternalServerError, "could not mark attendance")
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true, "marked_at": markedAt.In(classTZ).Format(time.RFC3339),
 	})
 }
@@ -452,7 +452,7 @@ func (h *AttendanceHandler) history(w http.ResponseWriter, r *http.Request, user
 	if v := r.URL.Query().Get("to"); v != "" {
 		t, err := time.ParseInLocation("2006-01-02", v, classTZ)
 		if err != nil {
-			h.fail(w, http.StatusBadRequest, "to must be YYYY-MM-DD")
+			writeErr(w, http.StatusBadRequest, "to must be YYYY-MM-DD")
 			return
 		}
 		if t.Before(today) {
@@ -462,13 +462,13 @@ func (h *AttendanceHandler) history(w http.ResponseWriter, r *http.Request, user
 	if v := r.URL.Query().Get("from"); v != "" {
 		t, err := time.ParseInLocation("2006-01-02", v, classTZ)
 		if err != nil {
-			h.fail(w, http.StatusBadRequest, "from must be YYYY-MM-DD")
+			writeErr(w, http.StatusBadRequest, "from must be YYYY-MM-DD")
 			return
 		}
 		from = t
 	}
 	if from.After(to) {
-		h.fail(w, http.StatusBadRequest, "from is after to")
+		writeErr(w, http.StatusBadRequest, "from is after to")
 		return
 	}
 	if to.Sub(from) > maxHistoryDays*24*time.Hour {
@@ -478,13 +478,13 @@ func (h *AttendanceHandler) history(w http.ResponseWriter, r *http.Request, user
 	schedules, err := h.studentSchedules(r.Context(), userID)
 	if err != nil {
 		h.Log.Error("load schedules failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load attendance")
+		writeErr(w, http.StatusInternalServerError, "could not load attendance")
 		return
 	}
 	marked, err := h.markedIn(r.Context(), userID, from.Format("2006-01-02"), to.Format("2006-01-02"))
 	if err != nil {
 		h.Log.Error("load attendance failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load attendance")
+		writeErr(w, http.StatusInternalServerError, "could not load attendance")
 		return
 	}
 	sessions := expand(schedules, from, to, now, marked)
@@ -521,7 +521,7 @@ func (h *AttendanceHandler) history(w http.ResponseWriter, r *http.Request, user
 		courses = append(courses, *byCourse[id])
 	}
 
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"from":     from.Format("2006-01-02"),
 		"to":       to.Format("2006-01-02"),
 		"present":  present,
@@ -548,7 +548,7 @@ func (h *AttendanceHandler) ListSchedules(w http.ResponseWriter, r *http.Request
 	`)
 	if err != nil {
 		h.Log.Error("list schedules failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load classes")
+		writeErr(w, http.StatusInternalServerError, "could not load classes")
 		return
 	}
 	defer rows.Close()
@@ -559,7 +559,7 @@ func (h *AttendanceHandler) ListSchedules(w http.ResponseWriter, r *http.Request
 		if err := rows.Scan(&a.ID, &a.CourseID, &a.Title, &a.Instructor, &a.MeetingURL, &days,
 			&a.StartTime, &a.EndTime, &a.StartDate, &a.EndDate, &a.IsActive, &a.Enrolled); err != nil {
 			h.Log.Error("scan schedule failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load classes")
+			writeErr(w, http.StatusInternalServerError, "could not load classes")
 			return
 		}
 		for _, d := range days {
@@ -567,17 +567,17 @@ func (h *AttendanceHandler) ListSchedules(w http.ResponseWriter, r *http.Request
 		}
 		out = append(out, a)
 	}
-	h.json(w, http.StatusOK, map[string]any{"classes": out})
+	writeJSON(w, http.StatusOK, map[string]any{"classes": out})
 }
 
 func (h *AttendanceHandler) decodeSchedule(w http.ResponseWriter, r *http.Request) (classSchedule, bool) {
 	var s classSchedule
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&s); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return s, false
 	}
 	if err := s.validate(); err != nil {
-		h.fail(w, http.StatusBadRequest, err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return s, false
 	}
 	return s, true
@@ -599,10 +599,10 @@ func (h *AttendanceHandler) CreateSchedule(w http.ResponseWriter, r *http.Reques
 		s.StartDate, s.EndDate, s.IsActive).Scan(&id)
 	if err != nil {
 		h.Log.Error("create schedule failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not create the class")
+		writeErr(w, http.StatusInternalServerError, "could not create the class")
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{"success": true, "id": id})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id})
 }
 
 // UpdateSchedule backs PUT /api/admin/classes/{id}.
@@ -621,14 +621,14 @@ func (h *AttendanceHandler) UpdateSchedule(w http.ResponseWriter, r *http.Reques
 		s.StartDate, s.EndDate, s.IsActive)
 	if err != nil {
 		h.Log.Error("update schedule failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update the class")
+		writeErr(w, http.StatusInternalServerError, "could not update the class")
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		h.fail(w, http.StatusNotFound, "class not found")
+		writeErr(w, http.StatusNotFound, "class not found")
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // DeleteSchedule backs DELETE /api/admin/classes/{id}. Its attendance goes with
@@ -637,14 +637,14 @@ func (h *AttendanceHandler) DeleteSchedule(w http.ResponseWriter, r *http.Reques
 	tag, err := h.Pool.Exec(r.Context(), `DELETE FROM class_schedules WHERE id = $1::uuid`, id)
 	if err != nil {
 		h.Log.Error("delete schedule failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not delete the class")
+		writeErr(w, http.StatusInternalServerError, "could not delete the class")
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		h.fail(w, http.StatusNotFound, "class not found")
+		writeErr(w, http.StatusNotFound, "class not found")
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // SessionRoster backs GET /api/admin/classes/{id}/attendance?date=YYYY-MM-DD —
@@ -653,7 +653,7 @@ func (h *AttendanceHandler) SessionRoster(w http.ResponseWriter, r *http.Request
 	s, err := scanSchedule(h.Pool.QueryRow(r.Context(),
 		`SELECT `+scheduleColumns+` FROM class_schedules c WHERE c.id = $1::uuid`, id))
 	if err != nil {
-		h.fail(w, http.StatusNotFound, "class not found")
+		writeErr(w, http.StatusNotFound, "class not found")
 		return
 	}
 
@@ -664,7 +664,7 @@ func (h *AttendanceHandler) SessionRoster(w http.ResponseWriter, r *http.Request
 	}
 	day, err := time.ParseInLocation("2006-01-02", date, classTZ)
 	if err != nil {
-		h.fail(w, http.StatusBadRequest, "date must be YYYY-MM-DD")
+		writeErr(w, http.StatusBadRequest, "date must be YYYY-MM-DD")
 		return
 	}
 	scheduled := s.runsOn(date, day.Weekday())
@@ -691,7 +691,7 @@ func (h *AttendanceHandler) SessionRoster(w http.ResponseWriter, r *http.Request
 	`, s.ID, date, s.CourseID)
 	if err != nil {
 		h.Log.Error("load roster failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load attendance")
+		writeErr(w, http.StatusInternalServerError, "could not load attendance")
 		return
 	}
 	defer rows.Close()
@@ -710,7 +710,7 @@ func (h *AttendanceHandler) SessionRoster(w http.ResponseWriter, r *http.Request
 		var at *time.Time
 		if err := rows.Scan(&rr.UserID, &rr.Name, &rr.Email, &at); err != nil {
 			h.Log.Error("scan roster failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load attendance")
+			writeErr(w, http.StatusInternalServerError, "could not load attendance")
 			return
 		}
 		switch {
@@ -724,7 +724,7 @@ func (h *AttendanceHandler) SessionRoster(w http.ResponseWriter, r *http.Request
 		}
 		out = append(out, rr)
 	}
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"class": s, "date": date, "state": state, "present": present, "students": out,
 	})
 }
@@ -736,13 +736,4 @@ func nonNil(s []classSession) []classSession {
 		return []classSession{}
 	}
 	return s
-}
-
-func (h *AttendanceHandler) json(w http.ResponseWriter, code int, v any) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (h *AttendanceHandler) fail(w http.ResponseWriter, code int, msg string) {
-	h.json(w, code, map[string]string{"error": msg})
 }

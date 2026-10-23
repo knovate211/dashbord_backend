@@ -18,6 +18,7 @@ import (
 
 	"github.com/knovate211/api-gateway/middleware"
 	pkgauth "github.com/knovate211/pkg/auth"
+	pkgconfig "github.com/knovate211/pkg/config"
 )
 
 // CertificationHandler sells and runs paid certification exams.
@@ -83,8 +84,8 @@ func NewCertificationHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.L
 		// Same reasoning as enrolment: per-IP off by default so one college
 		// network cannot lock itself out, per-email tight enough to stop one
 		// person hammering checkout.
-		ipLimiter:    newRateLimiter(envInt("CERTIFICATION_IP_LIMIT", 0), envMinutes("CERTIFICATION_IP_WINDOW_MIN", 10)),
-		emailLimiter: newRateLimiter(envInt("CERTIFICATION_EMAIL_LIMIT", 10), time.Hour),
+		ipLimiter:    newRateLimiter(pkgconfig.EnvInt("CERTIFICATION_IP_LIMIT", 0), envMinutes("CERTIFICATION_IP_WINDOW_MIN", 10)),
+		emailLimiter: newRateLimiter(pkgconfig.EnvInt("CERTIFICATION_EMAIL_LIMIT", 10), time.Hour),
 	}
 	if err := h.ensureTables(ctx); err != nil {
 		return nil, err
@@ -237,7 +238,7 @@ func (h *CertificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	case path == "/credential" && r.Method == http.MethodGet:
 		h.handleCredential(w, r, r.URL.Query().Get("id"))
 	default:
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -274,7 +275,7 @@ func (h *CertificationHandler) handleConfig(w http.ResponseWriter, r *http.Reque
 	`)
 	if err != nil {
 		h.Log.Error("list certification exams failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the exams, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not load the exams, please try again")
 		return
 	}
 	defer rows.Close()
@@ -286,13 +287,13 @@ func (h *CertificationHandler) handleConfig(w http.ResponseWriter, r *http.Reque
 		if err := rows.Scan(&e.Slug, &e.Title, &e.CourseID, &e.Summary, &pricePaise, &e.PassPercent,
 			&e.LinkValidDays, &e.PaperTitle, &e.DurationMinutes, &e.TotalMarks); err != nil {
 			h.Log.Error("scan certification exam failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load the exams, please try again")
+			writeErr(w, http.StatusInternalServerError, "could not load the exams, please try again")
 			return
 		}
 		e.PriceRupees = pricePaise / 100
 		out = append(out, e)
 	}
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": h.paymentsEnabled(),
 		"exams":   out,
 	})
@@ -305,11 +306,11 @@ func (h *CertificationHandler) handleConfig(w http.ResponseWriter, r *http.Reque
 // and eligibility is written only once the payment verifies.
 func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 	if !h.paymentsEnabled() {
-		h.fail(w, http.StatusServiceUnavailable, "exam registration is not available right now — please contact us")
+		writeErr(w, http.StatusServiceUnavailable, "exam registration is not available right now — please contact us")
 		return
 	}
 	if !h.ipLimiter.allow(clientIP(r)) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
 		return
 	}
 
@@ -322,14 +323,14 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		Website      string `json:"website"` // honeypot
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request")
+		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	if strings.TrimSpace(req.Website) != "" {
 		// Answer a bot exactly like a success, so it learns nothing — but never
 		// create an order for it.
 		h.Log.Info("certification honeypot triggered", zap.String("ip", clientIP(r)))
-		h.write(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
 
@@ -337,20 +338,20 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 	email := strings.ToLower(clip(strings.TrimSpace(req.Email), 200))
 	phone := clip(strings.TrimSpace(req.Phone), 30)
 	if name == "" {
-		h.fail(w, http.StatusBadRequest, "please enter your name — it is printed on the certificate")
+		writeErr(w, http.StatusBadRequest, "please enter your name — it is printed on the certificate")
 		return
 	}
 	if a, err := mail.ParseAddress(email); err != nil || a.Address != email {
-		h.fail(w, http.StatusBadRequest, "please enter a valid email address — your exam link is sent there")
+		writeErr(w, http.StatusBadRequest, "please enter a valid email address — your exam link is sent there")
 		return
 	}
 	mobile, ok := cashfreePhone(phone)
 	if !ok {
-		h.fail(w, http.StatusBadRequest, "please enter a valid 10-digit mobile number (it starts with 6, 7, 8 or 9) — the payment page needs it")
+		writeErr(w, http.StatusBadRequest, "please enter a valid 10-digit mobile number (it starts with 6, 7, 8 or 9) — the payment page needs it")
 		return
 	}
 	if !h.emailLimiter.allow(email) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts for this email — please try again later")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts for this email — please try again later")
 		return
 	}
 
@@ -367,12 +368,12 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		  AND  (c.closes_at IS NULL OR c.closes_at >= now())
 	`, clip(req.Slug, 80)).Scan(&examID, &title, &pricePaise, &resitWait)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "that exam is not open for registration")
+		writeErr(w, http.StatusNotFound, "that exam is not open for registration")
 		return
 	}
 	if err != nil {
 		h.Log.Error("look up certification exam failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start your registration, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start your registration, please try again")
 		return
 	}
 
@@ -387,7 +388,7 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		LIMIT  1
 	`, examID, email).Scan(&liveStatus)
 	if err == nil {
-		h.fail(w, http.StatusConflict,
+		writeErr(w, http.StatusConflict,
 			"you already have an exam link for "+title+" — check your email, or contact us to have it resent")
 		return
 	}
@@ -399,7 +400,7 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		               WHERE exam_id = $1::uuid AND lower(email) = $2 AND status = 'passed')
 	`, examID, email).Scan(&alreadyPassed)
 	if alreadyPassed {
-		h.fail(w, http.StatusConflict, "you have already passed "+title+" — your certificate is in your account")
+		writeErr(w, http.StatusConflict, "you have already passed "+title+" — your certificate is in your account")
 		return
 	}
 
@@ -413,7 +414,7 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		`, examID, email).Scan(&failedAt)
 		if failedAt != nil {
 			if wait := failedAt.Add(time.Duration(resitWait) * 24 * time.Hour); time.Now().UTC().Before(wait) {
-				h.fail(w, http.StatusConflict, fmt.Sprintf(
+				writeErr(w, http.StatusConflict, fmt.Sprintf(
 					"you can resit this exam from %s — resits open %d days after an attempt",
 					wait.Format("2 January 2006"), resitWait))
 				return
@@ -436,7 +437,7 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8) RETURNING id::text
 	`, examID, name, email, phone, amountPaise, quote.Code, quote.DiscountPaise, quote.Flags).Scan(&regID); err != nil {
 		h.Log.Error("insert certification registration failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start your registration, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start your registration, please try again")
 		return
 	}
 
@@ -446,7 +447,7 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		WHERE id = $1::uuid
 	`, regID, gatewayOrderID); err != nil {
 		h.Log.Error("store certification order id failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start your registration, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start your registration, please try again")
 		return
 	}
 	sessionID, err := h.pay.createOrder(ctx, cashfreeOrderReq{
@@ -462,11 +463,11 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 		h.Log.Error("create certification cashfree order failed", zap.Error(err))
 		_, _ = h.Pool.Exec(ctx, `UPDATE certification_registrations SET error = $2, updated_at = now() WHERE id = $1::uuid`,
 			regID, clip(err.Error(), 500))
-		h.fail(w, http.StatusBadGateway, "the payment gateway did not respond — please try again in a minute")
+		writeErr(w, http.StatusBadGateway, "the payment gateway did not respond — please try again in a minute")
 		return
 	}
 
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"order_id":           gatewayOrderID,
 		"payment_session_id": sessionID,
 		"mode":               h.pay.modeName(),
@@ -485,76 +486,76 @@ func (h *CertificationHandler) handleOrder(w http.ResponseWriter, r *http.Reques
 // paid is asked of Cashfree, never taken from the request.
 func (h *CertificationHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if !h.paymentsEnabled() {
-		h.fail(w, http.StatusServiceUnavailable, "exam registration is not available")
+		writeErr(w, http.StatusServiceUnavailable, "exam registration is not available")
 		return
 	}
 	var req struct {
 		OrderID string `json:"order_id"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil || !strings.HasPrefix(req.OrderID, "cert_") {
-		h.fail(w, http.StatusBadRequest, "invalid request")
+		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	ctx := r.Context()
 	paymentID, paidPaise, err := h.pay.paidOrder(ctx, req.OrderID)
 	if errors.Is(err, errNotPaid) {
-		h.fail(w, http.StatusPaymentRequired, "the payment was not completed — no money was taken. Please try again")
+		writeErr(w, http.StatusPaymentRequired, "the payment was not completed — no money was taken. Please try again")
 		return
 	}
 	if err != nil {
 		h.Log.Error("cashfree order lookup failed", zap.String("order", req.OrderID), zap.Error(err))
-		h.fail(w, http.StatusBadGateway, "we could not confirm your payment with the gateway yet — if money was deducted, your exam link will follow within a few minutes")
+		writeErr(w, http.StatusBadGateway, "we could not confirm your payment with the gateway yet — if money was deducted, your exam link will follow within a few minutes")
 		return
 	}
 	if err := h.checkAmount(ctx, req.OrderID, paidPaise); err != nil {
 		h.Log.Error("certification amount mismatch", zap.String("order", req.OrderID), zap.Error(err))
-		h.fail(w, http.StatusBadRequest, "the payment could not be matched to your registration — contact us with order id "+req.OrderID)
+		writeErr(w, http.StatusBadRequest, "the payment could not be matched to your registration — contact us with order id "+req.OrderID)
 		return
 	}
 	res, err := h.fulfil(ctx, req.OrderID, paymentID)
 	if err != nil {
 		h.Log.Error("certification fulfilment failed", zap.String("order", req.OrderID), zap.Error(err))
-		h.fail(w, http.StatusInternalServerError,
+		writeErr(w, http.StatusInternalServerError,
 			"your payment was received but we could not issue your exam link — our team can send it to you")
 		return
 	}
-	h.write(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (h *CertificationHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if !h.paymentsEnabled() {
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
 	ev, err := h.pay.parseWebhook(r)
 	if err != nil {
-		h.fail(w, http.StatusBadRequest, err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Course enrolments share the Cashfree account; theirs are acknowledged
 	// and left alone, so the two handlers cannot fulfil each other's payments.
 	if !ev.succeeded() || !strings.HasPrefix(ev.OrderID, "cert_") {
-		h.write(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
 	if err := h.checkAmount(r.Context(), ev.OrderID, ev.PaidPaise); err != nil {
 		if !errors.Is(err, errNotOurOrder) {
 			h.Log.Error("certification webhook amount mismatch", zap.String("order", ev.OrderID), zap.Error(err))
 		}
-		h.write(w, http.StatusOK, map[string]bool{"ok": true}) // a retry cannot fix either case
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true}) // a retry cannot fix either case
 		return
 	}
 	if _, err := h.fulfil(r.Context(), ev.OrderID, ev.PaymentID); err != nil {
 		if errors.Is(err, errNotOurOrder) {
-			h.write(w, http.StatusOK, map[string]bool{"ok": true})
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 			return
 		}
 		h.Log.Error("certification webhook fulfilment failed", zap.String("order", ev.OrderID), zap.Error(err))
 		// 500 makes Cashfree retry, which is what we want for a transient error.
-		h.fail(w, http.StatusInternalServerError, "fulfilment failed")
+		writeErr(w, http.StatusInternalServerError, "fulfilment failed")
 		return
 	}
-	h.write(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // checkAmount refuses a payment that does not match the registration it pays
@@ -763,16 +764,16 @@ func (h *CertificationHandler) handleClaim(w http.ResponseWriter, r *http.Reques
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	raw := clip(body.Token, 200)
 	if raw == "" {
-		h.fail(w, http.StatusBadRequest, "this link is missing its access token")
+		writeErr(w, http.StatusBadRequest, "this link is missing its access token")
 		return
 	}
 	if !h.ipLimiter.allow("cert-claim:" + clientIP(r)) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
 		return
 	}
 
@@ -792,12 +793,12 @@ func (h *CertificationHandler) handleClaim(w http.ResponseWriter, r *http.Reques
 	if errors.Is(err, pgx.ErrNoRows) {
 		// One answer for a token that never existed and one that was replaced,
 		// so this cannot be used to probe for live links.
-		h.fail(w, http.StatusUnauthorized, "this link is no longer valid — please contact us if you have paid for this exam")
+		writeErr(w, http.StatusUnauthorized, "this link is no longer valid — please contact us if you have paid for this exam")
 		return
 	}
 	if err != nil {
 		h.Log.Error("look up certification claim failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your exam, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your exam, please try again")
 		return
 	}
 
@@ -808,15 +809,15 @@ func (h *CertificationHandler) handleClaim(w http.ResponseWriter, r *http.Reques
 		`, regID); err != nil {
 			h.Log.Warn("mark registration expired failed", zap.Error(err))
 		}
-		h.fail(w, http.StatusUnauthorized, "this exam link has expired — contact us to have it extended")
+		writeErr(w, http.StatusUnauthorized, "this exam link has expired — contact us to have it extended")
 		return
 	}
 	if certTerminal[status] {
-		h.fail(w, http.StatusConflict, "you have already sat this exam")
+		writeErr(w, http.StatusConflict, "you have already sat this exam")
 		return
 	}
 	if status == "created" {
-		h.fail(w, http.StatusConflict, "we have not received payment for this exam yet")
+		writeErr(w, http.StatusConflict, "we have not received payment for this exam yet")
 		return
 	}
 	// Same rule as the scholarship funnel: a public form accepts any address,
@@ -824,7 +825,7 @@ func (h *CertificationHandler) handleClaim(w http.ResponseWriter, r *http.Reques
 	if role != "applicant" {
 		h.Log.Warn("certification claim refused for existing account",
 			zap.String("email", email), zap.String("role", role))
-		h.fail(w, http.StatusConflict,
+		writeErr(w, http.StatusConflict,
 			"you already have a Knovate account — sign in with your password and the exam will be waiting in your tests (use \"Forgot password\" if you need to set one)")
 		return
 	}
@@ -838,19 +839,19 @@ func (h *CertificationHandler) handleClaim(w http.ResponseWriter, r *http.Reques
 		WHERE  id = $1::uuid
 	`, regID); err != nil {
 		h.Log.Error("mark registration claimed failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your exam, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your exam, please try again")
 		return
 	}
 
 	token, err := pkgauth.GenerateToken(userID, email, role, h.jwtSecret, 24*time.Hour)
 	if err != nil {
 		h.Log.Error("mint certification session failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your exam, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your exam, please try again")
 		return
 	}
 
 	h.Log.Info("certification claim accepted", zap.String("email", email), zap.String("exam", examTitle))
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"token": token,
 		"user": map[string]any{
 			"id": userID, "email": email, "name": userName, "role": role,
@@ -874,7 +875,7 @@ func (h *CertificationHandler) handleClaim(w http.ResponseWriter, r *http.Reques
 func (h *CertificationHandler) handleOutcome(w http.ResponseWriter, r *http.Request) {
 	attemptID := strings.TrimSpace(r.URL.Query().Get("attemptId"))
 	if attemptID == "" {
-		h.fail(w, http.StatusBadRequest, "attemptId is required")
+		writeErr(w, http.StatusBadRequest, "attemptId is required")
 		return
 	}
 
@@ -899,18 +900,18 @@ func (h *CertificationHandler) handleOutcome(w http.ResponseWriter, r *http.Requ
 	if errors.Is(err, pgx.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "invalid input syntax")) {
 		// Not a certification attempt — the caller is a scholarship or practice
 		// taker and the result page should fall back to its own rendering.
-		h.write(w, http.StatusOK, map[string]any{"isCertification": false})
+		writeJSON(w, http.StatusOK, map[string]any{"isCertification": false})
 		return
 	}
 	if err != nil {
 		h.Log.Error("load certification outcome failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load your result, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not load your result, please try again")
 		return
 	}
 
 	// Still grading: say so rather than reporting a fail on a partial score.
 	if attemptStatus == "in_progress" || attemptStatus == "submitted" || attemptStatus == "evaluating" {
-		h.write(w, http.StatusOK, map[string]any{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"isCertification": true, "examTitle": examTitle, "evaluating": true,
 			"passPercent": passPercent,
 		})
@@ -953,7 +954,7 @@ func (h *CertificationHandler) handleOutcome(w http.ResponseWriter, r *http.Requ
 			resp["issuedAt"] = cert.IssuedAt.Format(time.RFC3339)
 		}
 	}
-	h.write(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type certificate struct {
@@ -1026,7 +1027,7 @@ func (h *CertificationHandler) issueCertificate(ctx context.Context, regID, user
 func (h *CertificationHandler) handleMine(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	rows, err := h.Pool.Query(r.Context(), `
@@ -1038,7 +1039,7 @@ func (h *CertificationHandler) handleMine(w http.ResponseWriter, r *http.Request
 	`, userID)
 	if err != nil {
 		h.Log.Error("list certificates failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load your certificates")
+		writeErr(w, http.StatusInternalServerError, "could not load your certificates")
 		return
 	}
 	defer rows.Close()
@@ -1058,14 +1059,14 @@ func (h *CertificationHandler) handleMine(w http.ResponseWriter, r *http.Request
 		var issued time.Time
 		if err := rows.Scan(&it.CredentialID, &it.Title, &it.ScorePercent, &issued, &it.Revoked, &it.Source); err != nil {
 			h.Log.Error("scan certificate failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load your certificates")
+			writeErr(w, http.StatusInternalServerError, "could not load your certificates")
 			return
 		}
 		it.IssuedAt = issued.Format("2006-01-02")
 		it.VerifyURL = h.siteBase + "/verify/" + it.CredentialID
 		out = append(out, it)
 	}
-	h.write(w, http.StatusOK, map[string]any{"certificates": out})
+	writeJSON(w, http.StatusOK, map[string]any{"certificates": out})
 }
 
 // ─── GET /api/certification/credential/{id} — public verification ─────────────
@@ -1077,7 +1078,7 @@ func (h *CertificationHandler) handleMine(w http.ResponseWriter, r *http.Request
 func (h *CertificationHandler) handleCredential(w http.ResponseWriter, r *http.Request, credentialID string) {
 	id := strings.ToUpper(clip(strings.TrimSpace(credentialID), 40))
 	if id == "" {
-		h.fail(w, http.StatusBadRequest, "credential id is required")
+		writeErr(w, http.StatusBadRequest, "credential id is required")
 		return
 	}
 	var c certificate
@@ -1086,12 +1087,12 @@ func (h *CertificationHandler) handleCredential(w http.ResponseWriter, r *http.R
 		FROM   certificates WHERE upper(credential_id) = $1
 	`, id).Scan(&c.CredentialID, &c.HolderName, &c.Title, &c.ScorePercent, &c.IssuedAt, &c.RevokedAt, &c.RevokeReason)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.write(w, http.StatusNotFound, map[string]any{"found": false})
+		writeJSON(w, http.StatusNotFound, map[string]any{"found": false})
 		return
 	}
 	if err != nil {
 		h.Log.Error("credential lookup failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not check that credential, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not check that credential, please try again")
 		return
 	}
 	resp := map[string]any{
@@ -1108,7 +1109,7 @@ func (h *CertificationHandler) handleCredential(w http.ResponseWriter, r *http.R
 	} else {
 		resp["scorePercent"] = c.ScorePercent
 	}
-	h.write(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ─── Expiry sweeper ───────────────────────────────────────────────────────────
@@ -1216,13 +1217,4 @@ func roundTo(v float64, places int) float64 {
 		return v
 	}
 	return f
-}
-
-func (h *CertificationHandler) write(w http.ResponseWriter, code int, v any) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (h *CertificationHandler) fail(w http.ResponseWriter, code int, msg string) {
-	h.write(w, code, map[string]string{"error": msg})
 }

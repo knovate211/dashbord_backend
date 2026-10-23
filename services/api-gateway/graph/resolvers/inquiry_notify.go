@@ -2,7 +2,6 @@ package resolvers
 
 import (
 	"fmt"
-	"net/smtp"
 	"os"
 	"strings"
 	"time"
@@ -20,13 +19,9 @@ import (
 // disabled and enquiries are only logged — so local development never sends
 // real email, and a missing config degrades the alert rather than the capture.
 type mailer struct {
-	host string
-	port string
-	user string
-	pass string
-	from string
-	to   []string
-	log  *zap.Logger
+	smtpConfig
+	to  []string
+	log *zap.Logger
 }
 
 func newMailer(log *zap.Logger) *mailer {
@@ -38,13 +33,9 @@ func newMailer(log *zap.Logger) *mailer {
 	}
 
 	m := &mailer{
-		host: os.Getenv("SMTP_HOST"),
-		port: envOr("SMTP_PORT", "587"),
-		user: os.Getenv("SMTP_USER"),
-		pass: os.Getenv("SMTP_PASS"),
-		from: envOr("SMTP_FROM", os.Getenv("SMTP_USER")),
-		to:   to,
-		log:  log,
+		smtpConfig: loadSMTPConfig(),
+		to:         to,
+		log:        log,
 	}
 
 	switch {
@@ -113,18 +104,7 @@ func (m *mailer) notify(in inquiryInput, name, email string) {
 			body,
 		}, "\r\n"))
 
-		// Only offer credentials when there are credentials to offer. Go's
-		// PlainAuth refuses to send a username over an unencrypted connection
-		// to anything but localhost, so passing an empty auth turns every
-		// no-auth relay — a local mail catcher, an internal smarthost, SES on
-		// an allow-listed IP — into "unencrypted connection" instead of a sent
-		// email. SendMail accepts a nil auth and simply skips AUTH.
-		var auth smtp.Auth
-		if m.user != "" {
-			auth = smtp.PlainAuth("", m.user, m.pass, m.host)
-		}
-		addr := m.host + ":" + m.port
-		if err := smtp.SendMail(addr, auth, m.from, m.to, msg); err != nil {
+		if err := m.sendMail(m.to, msg); err != nil {
 			// The enquiry is already saved, so this is an alerting failure, not
 			// a lost lead — log loudly and carry on.
 			m.log.Error("enquiry email failed to send",
@@ -140,11 +120,4 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

@@ -132,90 +132,85 @@ func (r *ProblemRepository) ListProblems(ctx context.Context, req *problemv1.Lis
 
 // GetProblem returns the full detail of a single problem by UUID or slug.
 func (r *ProblemRepository) GetProblem(ctx context.Context, req *problemv1.GetProblemRequest) (*problemv1.Problem, error) {
-	p := &problemv1.Problem{}
-	var ioMode string
-
-	// Either key is indexed; compare the uuid column only when the value can
-	// be one, since Postgres errors on a slug cast to uuid.
 	// The uuid comparison takes its own parameter: reusing $1 for both would
 	// type it as uuid and turn "slug = $1" into an invalid text = uuid.
-	where := "slug = $1"
+	where := "p.slug = $1"
 	args := []any{req.Id}
 	if ids.IsUUID(req.Id) {
-		where = "id = $2::uuid OR slug = $1"
+		where = "p.id = $2::uuid OR p.slug = $1"
 		args = append(args, req.Id)
 	}
+
+	// One round trip: the child rows come back as JSON arrays beside the
+	// problem. This used to be seven sequential queries whose errors were
+	// ignored, so a transient failure returned a half-built problem that was
+	// then cached for 15 minutes.
+	var (
+		p                                                  = &problemv1.Problem{}
+		ioMode                                             string
+		constraintsJSON, tagsJSON, examplesJSON, casesJSON []byte
+		hintsJSON                                          []byte
+		sc                                                 = &problemv1.StarterCodes{}
+	)
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, slug, title, difficulty, topic, xp, statement,
-		       COALESCE(set_id::text, '') AS set_id, io_mode, is_private
-		FROM   problems
-		WHERE  `+where, args...).Scan(&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode, &p.IsPrivate)
+		SELECT p.id, p.slug, p.title, p.difficulty, p.topic, p.xp, p.statement,
+		       COALESCE(p.set_id::text, ''), p.io_mode, p.is_private,
+		       COALESCE((SELECT json_agg(c.constraint_text ORDER BY c.order_index)
+		                 FROM problem_constraints c WHERE c.problem_id = p.id), '[]'),
+		       COALESCE((SELECT json_agg(t.tag) FROM problem_tags t WHERE t.problem_id = p.id), '[]'),
+		       COALESCE((SELECT json_agg(json_build_object('input', e.input, 'output', e.output, 'explanation', e.explanation)
+		                                 ORDER BY e.order_index)
+		                 FROM examples e WHERE e.problem_id = p.id), '[]'),
+		       COALESCE((SELECT json_agg(json_build_object('input', tc.input, 'expected', tc.expected_output)
+		                                 ORDER BY tc.order_index)
+		                 FROM test_cases tc WHERE tc.problem_id = p.id AND NOT tc.is_hidden), '[]'),
+		       COALESCE((SELECT json_agg(json_build_object('order', h.order_index, 'title', h.title, 'body', h.body)
+		                                 ORDER BY h.order_index)
+		                 FROM hints h WHERE h.problem_id = p.id), '[]'),
+		       COALESCE(sc.javascript, ''), COALESCE(sc.python, ''), COALESCE(sc.java, ''),
+		       COALESCE(sc.cpp, ''), COALESCE(sc.go, '')
+		FROM   problems p
+		LEFT   JOIN starter_codes sc ON sc.problem_id = p.id
+		WHERE  `+where, args...).Scan(
+		&p.Id, &p.Slug, &p.Title, &p.Difficulty, &p.Topic, &p.Xp, &p.Statement, &p.SetId, &ioMode, &p.IsPrivate,
+		&constraintsJSON, &tagsJSON, &examplesJSON, &casesJSON, &hintsJSON,
+		&sc.Javascript, &sc.Python, &sc.Java, &sc.Cpp, &sc.Go)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("problem not found: %s", req.Id)
+			return nil, fmt.Errorf("%w: %s", ErrProblemNotFound, req.Id)
 		}
 		return nil, fmt.Errorf("get problem: %w", err)
 	}
 
-	// Constraints
-	cRows, _ := r.pool.Query(ctx,
-		"SELECT constraint_text FROM problem_constraints WHERE problem_id = $1 ORDER BY order_index", p.Id)
-	if cRows != nil {
-		for cRows.Next() {
-			var c string
-			cRows.Scan(&c) //nolint:errcheck
-			p.Constraints = append(p.Constraints, c)
+	var cases []visibleCase
+	for _, part := range []struct {
+		raw  []byte
+		into any
+	}{
+		{constraintsJSON, &p.Constraints},
+		{tagsJSON, &p.Tags},
+		{examplesJSON, &p.Examples},
+		{casesJSON, &cases},
+		{hintsJSON, &p.Hints},
+	} {
+		if err := json.Unmarshal(part.raw, part.into); err != nil {
+			return nil, fmt.Errorf("get problem: decode details: %w", err)
 		}
-		cRows.Close()
 	}
-
-	// Tags
-	tRows, _ := r.pool.Query(ctx, "SELECT tag FROM problem_tags WHERE problem_id = $1", p.Id)
-	if tRows != nil {
-		for tRows.Next() {
-			var t string
-			tRows.Scan(&t) //nolint:errcheck
-			p.Tags = append(p.Tags, t)
-		}
-		tRows.Close()
-	}
-
-	// Examples
-	eRows, _ := r.pool.Query(ctx,
-		"SELECT input, output, explanation FROM examples WHERE problem_id = $1 ORDER BY order_index", p.Id)
-	if eRows != nil {
-		for eRows.Next() {
-			ex := &problemv1.Example{}
-			eRows.Scan(&ex.Input, &ex.Output, &ex.Explanation) //nolint:errcheck
-			p.Examples = append(p.Examples, ex)
-		}
-		eRows.Close()
-	}
-	if err := r.alignExamplesToTestCases(ctx, p, ioMode); err != nil {
-		return nil, err
-	}
-
-	// Hints
-	hRows, _ := r.pool.Query(ctx,
-		"SELECT order_index, title, body FROM hints WHERE problem_id = $1 ORDER BY order_index", p.Id)
-	if hRows != nil {
-		for hRows.Next() {
-			h := &problemv1.Hint{}
-			hRows.Scan(&h.Order, &h.Title, &h.Body) //nolint:errcheck
-			p.Hints = append(p.Hints, h)
-		}
-		hRows.Close()
-	}
-
-	// Starter codes
-	sc := &problemv1.StarterCodes{}
-	r.pool.QueryRow(ctx, //nolint:errcheck
-		"SELECT javascript, python, java, cpp, go FROM starter_codes WHERE problem_id = $1", p.Id).
-		Scan(&sc.Javascript, &sc.Python, &sc.Java, &sc.Cpp, &sc.Go)
+	p.Examples = alignExamplesToTestCases(p.Examples, cases, ioMode)
 	p.StarterCodes = sc
 	p.SupportedLanguages = supportedLanguages(ioMode, sc)
-
 	return p, nil
+}
+
+// ErrProblemNotFound is returned by GetProblem when no problem has that id or
+// slug, as opposed to the lookup itself failing.
+var ErrProblemNotFound = errors.New("problem not found")
+
+// visibleCase is a test case shown to the learner.
+type visibleCase struct {
+	Input    string `json:"input"`
+	Expected string `json:"expected"`
 }
 
 // alignExamplesToTestCases replaces each displayed example's input and output
@@ -231,32 +226,9 @@ func (r *ProblemRepository) GetProblem(ctx context.Context, req *problemv1.GetPr
 // Only function-mode problems are realigned. stdio problems print free-form
 // text and SQL problems carry a fixture document as their input; for both, the
 // authored prose is the more useful thing to show.
-func (r *ProblemRepository) alignExamplesToTestCases(ctx context.Context, p *problemv1.Problem, ioMode string) error {
-	if ioMode != "function" || len(p.Examples) == 0 {
-		return nil
-	}
-
-	rows, err := r.pool.Query(ctx, `
-		SELECT input, expected_output
-		FROM   test_cases
-		WHERE  problem_id = $1 AND is_hidden = false
-		ORDER  BY order_index`, p.Id)
-	if err != nil {
-		return fmt.Errorf("align examples: %w", err)
-	}
-	defer rows.Close()
-
-	type visible struct{ input, expected string }
-	var cases []visible
-	for rows.Next() {
-		var v visible
-		if err := rows.Scan(&v.input, &v.expected); err != nil {
-			return fmt.Errorf("align examples: %w", err)
-		}
-		cases = append(cases, v)
-	}
-	if len(cases) == 0 {
-		return nil
+func alignExamplesToTestCases(examples []*problemv1.Example, cases []visibleCase, ioMode string) []*problemv1.Example {
+	if ioMode != "function" || len(examples) == 0 || len(cases) == 0 {
+		return examples
 	}
 
 	// Show one example per visible test case. An authored explanation is kept
@@ -265,14 +237,13 @@ func (r *ProblemRepository) alignExamplesToTestCases(ctx context.Context, p *pro
 	// to contradict the ones above them.
 	aligned := make([]*problemv1.Example, 0, len(cases))
 	for i, c := range cases {
-		ex := &problemv1.Example{Input: c.input, Output: c.expected}
-		if i < len(p.Examples) {
-			ex.Explanation = p.Examples[i].Explanation
+		ex := &problemv1.Example{Input: c.Input, Output: c.Expected}
+		if i < len(examples) {
+			ex.Explanation = examples[i].Explanation
 		}
 		aligned = append(aligned, ex)
 	}
-	p.Examples = aligned
-	return nil
+	return aligned
 }
 
 // placeholderStarter reports whether a starter template is filler rather than

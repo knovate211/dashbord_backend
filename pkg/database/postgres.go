@@ -11,13 +11,19 @@ import (
 // NewPostgresPool creates and validates a pgxpool connection pool from a DSN.
 // DSN format: postgres://user:password@host:port/dbname?sslmode=disable
 func NewPostgresPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	return NewPostgresPoolWithMax(ctx, dsn, 20)
+}
+
+// NewPostgresPoolWithMax is NewPostgresPool with an explicit connection cap,
+// for a process that shares the database's connection limit with the services
+// and should take a smaller slice of it.
+func NewPostgresPoolWithMax(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres config: %w", err)
 	}
 
-	// Sensible pool defaults
-	config.MaxConns = 20
+	config.MaxConns = maxConns
 	config.MinConns = 2
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)

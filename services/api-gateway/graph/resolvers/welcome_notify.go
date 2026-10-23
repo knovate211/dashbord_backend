@@ -2,8 +2,6 @@ package resolvers
 
 import (
 	"fmt"
-	"net/smtp"
-	"os"
 	"strings"
 
 	"go.uber.org/zap"
@@ -23,24 +21,16 @@ import (
 // NOT to have about the one mail that carries their password — and plain text
 // also survives the corporate filters that strip HTML wholesale.
 type userMailer struct {
-	host     string
-	port     string
-	user     string
-	pass     string
-	from     string
+	smtpConfig
 	loginURL string
 	log      *zap.Logger
 }
 
 func NewUserMailer(loginURL string, log *zap.Logger) *userMailer {
 	m := &userMailer{
-		host:     os.Getenv("SMTP_HOST"),
-		port:     envOr("SMTP_PORT", "587"),
-		user:     os.Getenv("SMTP_USER"),
-		pass:     os.Getenv("SMTP_PASS"),
-		from:     envOr("SMTP_FROM", os.Getenv("SMTP_USER")),
-		loginURL: strings.TrimRight(loginURL, "/") + "/login",
-		log:      log,
+		smtpConfig: loadSMTPConfig(),
+		loginURL:   strings.TrimRight(loginURL, "/") + "/login",
+		log:        log,
 	}
 	if m.host == "" {
 		log.Info("welcome email disabled (SMTP_HOST unset) — new accounts are created but not emailed")
@@ -115,15 +105,5 @@ func (m *userMailer) deliver(name, email, password string) error {
 		body,
 	}, "\r\n"))
 
-	// Only offer credentials when there are credentials to offer. Go's PlainAuth
-	// refuses to send a username over an unencrypted connection to anything but
-	// localhost, so passing an empty auth turns every no-auth relay — a local
-	// mail catcher, an internal smarthost, SES on an allow-listed IP — into
-	// "unencrypted connection" instead of a sent email. SendMail accepts a nil
-	// auth and simply skips AUTH.
-	var auth smtp.Auth
-	if m.user != "" {
-		auth = smtp.PlainAuth("", m.user, m.pass, m.host)
-	}
-	return smtp.SendMail(m.host+":"+m.port, auth, m.from, []string{email}, msg)
+	return m.sendMail([]string{email}, msg)
 }

@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
+	pkgconfig "github.com/knovate211/pkg/config"
 	pkgdb "github.com/knovate211/pkg/database"
 	pkglog "github.com/knovate211/pkg/logger"
 	assessmentv1 "github.com/knovate211/proto/assessment/v1"
@@ -134,21 +135,14 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		postgresDSN:           env("POSTGRES_DSN", "postgres://skillofide:password@localhost:5432/skillofide?sslmode=disable"),
-		natsURL:               env("NATS_URL", "nats://localhost:4222"),
-		submissionServiceAddr: env("SUBMISSION_SERVICE_ADDR", "localhost:50053"),
-		executionServiceAddr:  env("EXECUTION_SERVICE_ADDR", "localhost:50052"),
-		grpcPort:              env("GRPC_PORT", "50056"),
+		postgresDSN:           pkgconfig.Env("POSTGRES_DSN", "postgres://skillofide:password@localhost:5432/skillofide?sslmode=disable"),
+		natsURL:               pkgconfig.Env("NATS_URL", "nats://localhost:4222"),
+		submissionServiceAddr: pkgconfig.Env("SUBMISSION_SERVICE_ADDR", "localhost:50053"),
+		executionServiceAddr:  pkgconfig.Env("EXECUTION_SERVICE_ADDR", "localhost:50052"),
+		grpcPort:              pkgconfig.Env("GRPC_PORT", "50056"),
 		sweepInterval:         envDuration("SWEEP_INTERVAL_SECONDS", 30*time.Second),
-		logLevel:              env("LOG_LEVEL", "info"),
+		logLevel:              pkgconfig.Env("LOG_LEVEL", "info"),
 	}
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {

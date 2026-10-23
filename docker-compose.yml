@@ -261,6 +261,9 @@ services:
       LOG_LEVEL: info
       # RapidAPI key for JSearch, backing the Placement job board.
       JSEARCH_API_KEY: ${JSEARCH_API_KEY}
+      # Gemini key for the course pages' AI mentor chat. Empty disables it.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
       # Enquiry alerts. Leave SMTP_HOST empty to disable — enquiries are still
       # captured, they are just logged instead of emailed.
       # Defaults point at the local mailpit inbox so email works out of the box

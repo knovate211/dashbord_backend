@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pkgauth "github.com/knovate211/pkg/auth"
+	pkgconfig "github.com/knovate211/pkg/config"
 	"go.uber.org/zap"
 )
 
@@ -82,8 +83,8 @@ func NewPasswordResetHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.L
 		// allows resetMaxAttempts guesses. Requests are capped per email so a
 		// mailbox cannot be flooded. Direct mode has no code to protect, so it
 		// keeps an IP cap unless PASSWORD_RESET_IP_LIMIT is set explicitly.
-		limiter:      newRateLimiter(envInt("PASSWORD_RESET_IP_LIMIT", directDefault(allowDirect)), 10*time.Minute),
-		emailLimiter: newRateLimiter(envInt("PASSWORD_RESET_EMAIL_LIMIT", 5), time.Hour),
+		limiter:      newRateLimiter(pkgconfig.EnvInt("PASSWORD_RESET_IP_LIMIT", directDefault(allowDirect)), 10*time.Minute),
+		emailLimiter: newRateLimiter(pkgconfig.EnvInt("PASSWORD_RESET_EMAIL_LIMIT", 5), time.Hour),
 		mailer:       mailer,
 		allowDirect:  allowDirect,
 	}
@@ -136,12 +137,12 @@ func (h *PasswordResetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if r.Method != http.MethodPost {
-		h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	if !h.limiter.allow(clientIP(r)) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts — please try again shortly")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts — please try again shortly")
 		return
 	}
 
@@ -151,7 +152,7 @@ func (h *PasswordResetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	case "/confirm":
 		h.handleConfirm(w, r)
 	default:
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -163,17 +164,17 @@ type resetRequestInput struct {
 func (h *PasswordResetHandler) handleRequest(w http.ResponseWriter, r *http.Request) {
 	var in resetRequestInput
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	email := strings.ToLower(strings.TrimSpace(clip(in.Email, 200)))
 	if !looksLikeEmail(email) {
-		h.fail(w, http.StatusBadRequest, "please enter a valid email address")
+		writeErr(w, http.StatusBadRequest, "please enter a valid email address")
 		return
 	}
 	if !h.emailLimiter.allow(email) {
-		h.fail(w, http.StatusTooManyRequests, "too many reset requests for this email — please try again later")
+		writeErr(w, http.StatusTooManyRequests, "too many reset requests for this email — please try again later")
 		return
 	}
 
@@ -201,13 +202,13 @@ func (h *PasswordResetHandler) handleRequest(w http.ResponseWriter, r *http.Requ
 	code, err := generateResetCode()
 	if err != nil {
 		h.Log.Error("generate reset code failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start the reset, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start the reset, please try again")
 		return
 	}
 	codeHash, err := pkgauth.HashPassword(code)
 	if err != nil {
 		h.Log.Error("hash reset code failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start the reset, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start the reset, please try again")
 		return
 	}
 
@@ -224,7 +225,7 @@ func (h *PasswordResetHandler) handleRequest(w http.ResponseWriter, r *http.Requ
 	`, userID, email, codeHash, fmt.Sprintf("%d seconds", int(resetCodeTTL.Seconds())))
 	if err != nil {
 		h.Log.Error("store reset code failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start the reset, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start the reset, please try again")
 		return
 	}
 
@@ -241,7 +242,7 @@ type resetConfirmInput struct {
 func (h *PasswordResetHandler) handleConfirm(w http.ResponseWriter, r *http.Request) {
 	var in resetConfirmInput
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -250,12 +251,12 @@ func (h *PasswordResetHandler) handleConfirm(w http.ResponseWriter, r *http.Requ
 	newPassword := in.NewPassword
 
 	if len(newPassword) < resetMinPassword {
-		h.fail(w, http.StatusBadRequest,
+		writeErr(w, http.StatusBadRequest,
 			fmt.Sprintf("your new password must be at least %d characters", resetMinPassword))
 		return
 	}
 	if len(newPassword) > resetMaxPassword {
-		h.fail(w, http.StatusBadRequest,
+		writeErr(w, http.StatusBadRequest,
 			fmt.Sprintf("your new password must be %d characters or fewer", resetMaxPassword))
 		return
 	}
@@ -282,27 +283,27 @@ func (h *PasswordResetHandler) handleConfirm(w http.ResponseWriter, r *http.Requ
 		if err != pgx.ErrNoRows {
 			h.Log.Error("password reset confirm lookup failed", zap.Error(err))
 		}
-		h.fail(w, http.StatusBadRequest, rejected)
+		writeErr(w, http.StatusBadRequest, rejected)
 		return
 	}
 
 	if attempts >= resetMaxAttempts {
 		_, _ = h.Pool.Exec(r.Context(), `UPDATE password_resets SET used_at = now() WHERE id = $1::uuid`, resetID)
 		h.Log.Warn("password reset code burned after too many attempts", zap.String("email", email))
-		h.fail(w, http.StatusBadRequest, rejected)
+		writeErr(w, http.StatusBadRequest, rejected)
 		return
 	}
 
 	if ok, _ := pkgauth.CheckPassword(codeHash, code); !ok {
 		_, _ = h.Pool.Exec(r.Context(), `UPDATE password_resets SET attempts = attempts + 1 WHERE id = $1::uuid`, resetID)
-		h.fail(w, http.StatusBadRequest, rejected)
+		writeErr(w, http.StatusBadRequest, rejected)
 		return
 	}
 
 	hashed, err := pkgauth.HashPassword(newPassword)
 	if err != nil {
 		h.Log.Error("hash new password failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 		return
 	}
 
@@ -311,7 +312,7 @@ func (h *PasswordResetHandler) handleConfirm(w http.ResponseWriter, r *http.Requ
 	tx, err := h.Pool.Begin(r.Context())
 	if err != nil {
 		h.Log.Error("begin password reset tx failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 		return
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
@@ -320,19 +321,19 @@ func (h *PasswordResetHandler) handleConfirm(w http.ResponseWriter, r *http.Requ
 		UPDATE users SET password = $1, updated_at = now() WHERE id = $2::uuid
 	`, hashed, userID); err != nil {
 		h.Log.Error("update password failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 		return
 	}
 	if _, err := tx.Exec(r.Context(), `
 		UPDATE password_resets SET used_at = now() WHERE id = $1::uuid
 	`, resetID); err != nil {
 		h.Log.Error("consume reset code failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		h.Log.Error("commit password reset failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 		return
 	}
 
@@ -353,20 +354,20 @@ func (h *PasswordResetHandler) confirmDirect(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		if err != pgx.ErrNoRows {
 			h.Log.Error("direct reset lookup failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+			writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 			return
 		}
 		// Direct mode cannot hide which addresses exist — anyone can simply try
 		// to reset one and see. Given that, a clear message is more useful than
 		// a vague one that helps nobody.
-		h.fail(w, http.StatusBadRequest, "we could not find an account with that email address")
+		writeErr(w, http.StatusBadRequest, "we could not find an account with that email address")
 		return
 	}
 
 	hashed, err := pkgauth.HashPassword(newPassword)
 	if err != nil {
 		h.Log.Error("hash new password failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 		return
 	}
 
@@ -374,7 +375,7 @@ func (h *PasswordResetHandler) confirmDirect(w http.ResponseWriter, r *http.Requ
 		UPDATE users SET password = $1, updated_at = now() WHERE id = $2::uuid
 	`, hashed, userID); err != nil {
 		h.Log.Error("update password failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update your password, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not update your password, please try again")
 		return
 	}
 
@@ -401,11 +402,6 @@ func (h *PasswordResetHandler) ok(w http.ResponseWriter) {
 func (h *PasswordResetHandler) okWith(w http.ResponseWriter, body map[string]any) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-func (h *PasswordResetHandler) fail(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // directDefault is the per-IP cap used when PASSWORD_RESET_IP_LIMIT is unset:

@@ -2,7 +2,6 @@ package resolvers
 
 import (
 	"fmt"
-	"net/smtp"
 	"os"
 	"strings"
 	"time"
@@ -25,11 +24,7 @@ import (
 // sets their own via the existing password-reset flow — so an intercepted email
 // yields at most a time-boxed test link, never a durable credential.
 type scholarshipMailer struct {
-	host string
-	port string
-	user string
-	pass string
-	from string
+	smtpConfig
 	// staff receives the "new application" alert; empty means nobody is alerted
 	// while applicants are still mailed normally.
 	staff []string
@@ -56,13 +51,9 @@ func newScholarshipMailer(log *zap.Logger) *scholarshipMailer {
 	}
 
 	m := &scholarshipMailer{
-		host:  os.Getenv("SMTP_HOST"),
-		port:  envOr("SMTP_PORT", "587"),
-		user:  os.Getenv("SMTP_USER"),
-		pass:  os.Getenv("SMTP_PASS"),
-		from:  envOr("SMTP_FROM", os.Getenv("SMTP_USER")),
-		staff: staff,
-		log:   log,
+		smtpConfig: loadSMTPConfig(),
+		staff:      staff,
+		log:        log,
 	}
 
 	if m.host == "" {
@@ -258,17 +249,7 @@ func (m *scholarshipMailer) deliver(to []string, replyTo, subject, body, html, l
 			)
 		}
 
-		// Only offer credentials when there are credentials to offer. Go's
-		// PlainAuth refuses to send a username over an unencrypted connection
-		// to anything but localhost, so passing an empty auth turns every
-		// no-auth relay — a local mail catcher, an internal smarthost, SES on
-		// an allow-listed IP — into "unencrypted connection" instead of a sent
-		// email. SendMail accepts a nil auth and simply skips AUTH.
-		var auth smtp.Auth
-		if m.user != "" {
-			auth = smtp.PlainAuth("", m.user, m.pass, m.host)
-		}
-		if err := smtp.SendMail(m.host+":"+m.port, auth, m.from, to, []byte(strings.Join(headers, "\r\n"))); err != nil {
+		if err := m.sendMail(to, []byte(strings.Join(headers, "\r\n"))); err != nil {
 			m.log.Error("scholarship email failed to send",
 				zap.String("email", logEmail), zap.Error(err))
 			return err

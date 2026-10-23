@@ -10,7 +10,6 @@
 package codegen
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -128,16 +127,4 @@ func (s Signature) Validate() error {
 		return fmt.Errorf("codegen: unknown compare mode %q", s.Compare)
 	}
 	return nil
-}
-
-// ParseParams decodes the params JSONB column.
-func ParseParams(raw []byte) ([]Param, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	var ps []Param
-	if err := json.Unmarshal(raw, &ps); err != nil {
-		return nil, fmt.Errorf("codegen: decode params: %w", err)
-	}
-	return ps, nil
 }

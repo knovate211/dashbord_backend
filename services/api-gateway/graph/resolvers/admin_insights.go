@@ -108,7 +108,7 @@ func (h *AdminHandler) handleListAudit(w http.ResponseWriter, r *http.Request) {
 	var total int
 	if err := h.Pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM admin_audit_log WHERE `+cond, args...).Scan(&total); err != nil {
 		h.Log.Error("count audit failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to load audit log")
+		writeErr(w, http.StatusInternalServerError, "failed to load audit log")
 		return
 	}
 
@@ -120,7 +120,7 @@ func (h *AdminHandler) handleListAudit(w http.ResponseWriter, r *http.Request) {
 		LIMIT $%d OFFSET $%d`, cond, len(args)-1, len(args)), args...)
 	if err != nil {
 		h.Log.Error("list audit failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to load audit log")
+		writeErr(w, http.StatusInternalServerError, "failed to load audit log")
 		return
 	}
 	defer rows.Close()
@@ -132,14 +132,14 @@ func (h *AdminHandler) handleListAudit(w http.ResponseWriter, r *http.Request) {
 		var at time.Time
 		if err := rows.Scan(&e.ID, &e.ActorEmail, &e.Action, &e.TargetID, &e.TargetEmail, &detail, &at); err != nil {
 			h.Log.Error("scan audit failed", zap.Error(err))
-			h.jsonErr(w, http.StatusInternalServerError, "failed to load audit log")
+			writeErr(w, http.StatusInternalServerError, "failed to load audit log")
 			return
 		}
 		e.Detail = detail
 		e.CreatedAt = at.Format(time.RFC3339)
 		entries = append(entries, e)
 	}
-	h.json(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"entries": entries, "total": total, "page": page, "pageSize": pageSize,
 	})
 }
@@ -275,7 +275,7 @@ func (h *AdminHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 		return out
 	}
 
-	h.json(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"users_total":         total,
 		"users_by_role":       byRole,
 		"users_by_course":     byCourse,
@@ -329,7 +329,7 @@ func (h *AdminHandler) handleGradingQueue(w http.ResponseWriter, r *http.Request
 		LIMIT 50`)
 	if err != nil {
 		h.Log.Error("grading queue failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to load grading queue")
+		writeErr(w, http.StatusInternalServerError, "failed to load grading queue")
 		return
 	}
 	defer rows.Close()
@@ -354,7 +354,7 @@ func (h *AdminHandler) handleGradingQueue(w http.ResponseWriter, r *http.Request
 		it.SubmittedAt = at.Format(time.RFC3339)
 		items = append(items, it)
 	}
-	h.json(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,15 +371,15 @@ func (h *AdminHandler) handleBulkUsers(w http.ResponseWriter, r *http.Request) {
 		CourseID string   `json:"course_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if len(req.IDs) == 0 {
-		h.jsonErr(w, http.StatusBadRequest, "no users selected")
+		writeErr(w, http.StatusBadRequest, "no users selected")
 		return
 	}
 	if len(req.IDs) > 1000 {
-		h.jsonErr(w, http.StatusBadRequest, "at most 1000 users per bulk action")
+		writeErr(w, http.StatusBadRequest, "at most 1000 users per bulk action")
 		return
 	}
 
@@ -389,13 +389,14 @@ func (h *AdminHandler) handleBulkUsers(w http.ResponseWriter, r *http.Request) {
 	if req.Action == "delete" || (req.Action == "set_role" && req.Role != "admin") {
 		for _, id := range req.IDs {
 			if id == self {
-				h.jsonErr(w, http.StatusBadRequest, "you cannot delete or demote your own account")
+				writeErr(w, http.StatusBadRequest, "you cannot delete or demote your own account")
 				return
 			}
 		}
 	}
 
 	ctx := r.Context()
+	ids := onlyUUIDs(req.IDs)
 	var (
 		sql  string
 		args []interface{}
@@ -403,43 +404,43 @@ func (h *AdminHandler) handleBulkUsers(w http.ResponseWriter, r *http.Request) {
 	switch req.Action {
 	case "set_role":
 		if req.Role != "student" && req.Role != "admin" && req.Role != "recruiter" {
-			h.jsonErr(w, http.StatusBadRequest, "role must be 'student', 'recruiter' or 'admin'")
+			writeErr(w, http.StatusBadRequest, "role must be 'student', 'recruiter' or 'admin'")
 			return
 		}
-		sql = `UPDATE users SET role = $2, updated_at = now() WHERE id::text = ANY($1) AND role NOT IN ('applicant', 'candidate')
+		sql = `UPDATE users SET role = $2, updated_at = now() WHERE id = ANY($1) AND role NOT IN ('applicant', 'candidate')
 		       RETURNING id::text, email`
-		args = []interface{}{req.IDs, req.Role}
+		args = []interface{}{ids, req.Role}
 	case "grant_course":
 		if req.CourseID == "" {
-			h.jsonErr(w, http.StatusBadRequest, "course_id is required")
+			writeErr(w, http.StatusBadRequest, "course_id is required")
 			return
 		}
 		sql = `INSERT INTO user_courses (user_id, course_id)
-		       SELECT u.id, $2 FROM users u WHERE u.id::text = ANY($1)
+		       SELECT u.id, $2 FROM users u WHERE u.id = ANY($1)
 		       ON CONFLICT (user_id, course_id) DO NOTHING
 		       RETURNING user_id::text, (SELECT email FROM users WHERE id = user_id)`
-		args = []interface{}{req.IDs, req.CourseID}
+		args = []interface{}{ids, req.CourseID}
 	case "revoke_course":
 		if req.CourseID == "" {
-			h.jsonErr(w, http.StatusBadRequest, "course_id is required")
+			writeErr(w, http.StatusBadRequest, "course_id is required")
 			return
 		}
 		sql = `DELETE FROM user_courses uc USING users u
-		       WHERE uc.user_id = u.id AND u.id::text = ANY($1) AND uc.course_id = $2
+		       WHERE uc.user_id = u.id AND u.id = ANY($1) AND uc.course_id = $2
 		       RETURNING u.id::text, u.email`
-		args = []interface{}{req.IDs, req.CourseID}
+		args = []interface{}{ids, req.CourseID}
 	case "delete":
-		sql = `DELETE FROM users WHERE id::text = ANY($1) AND role NOT IN ('applicant', 'candidate') RETURNING id::text, email`
-		args = []interface{}{req.IDs}
+		sql = `DELETE FROM users WHERE id = ANY($1) AND role NOT IN ('applicant', 'candidate') RETURNING id::text, email`
+		args = []interface{}{ids}
 	default:
-		h.jsonErr(w, http.StatusBadRequest, "unknown action")
+		writeErr(w, http.StatusBadRequest, "unknown action")
 		return
 	}
 
 	rows, err := h.Pool.Query(ctx, sql, args...)
 	if err != nil {
 		h.Log.Error("bulk user action failed", zap.String("action", req.Action), zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "bulk action failed")
+		writeErr(w, http.StatusInternalServerError, "bulk action failed")
 		return
 	}
 	type affected struct{ id, email string }
@@ -453,7 +454,7 @@ func (h *AdminHandler) handleBulkUsers(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		h.Log.Error("bulk user action failed", zap.String("action", req.Action), zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "bulk action failed")
+		writeErr(w, http.StatusInternalServerError, "bulk action failed")
 		return
 	}
 
@@ -472,7 +473,7 @@ func (h *AdminHandler) handleBulkUsers(w http.ResponseWriter, r *http.Request) {
 		h.audit(ctx, auditAction, a.id, a.email, detail)
 	}
 
-	h.json(w, http.StatusOK, map[string]interface{}{"affected": len(done), "requested": len(req.IDs)})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"affected": len(done), "requested": len(req.IDs)})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -494,7 +495,7 @@ func (h *AdminHandler) handleExportUsers(w http.ResponseWriter, r *http.Request)
 		ORDER BY u.created_at DESC`, args...)
 	if err != nil {
 		h.Log.Error("export users failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to export users")
+		writeErr(w, http.StatusInternalServerError, "failed to export users")
 		return
 	}
 	defer rows.Close()
@@ -662,5 +663,5 @@ func (h *AdminHandler) handleActivity(w http.ResponseWriter, r *http.Request) {
 		t.At = t.at.UTC().Format(time.RFC3339)
 		out = append(out, t.activityItem)
 	}
-	h.json(w, http.StatusOK, map[string]any{"items": out})
+	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }

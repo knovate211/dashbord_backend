@@ -63,7 +63,7 @@ func (h *CourseProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
@@ -74,7 +74,7 @@ func (h *CourseProgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	case path != "" && r.Method == http.MethodPut:
 		h.save(w, r, userID, path)
 	default:
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -90,7 +90,7 @@ func (h *CourseProgressHandler) list(w http.ResponseWriter, r *http.Request, use
 		`SELECT course_key, max_index, last_lesson FROM course_progress WHERE user_id = $1`, userID)
 	if err != nil {
 		h.Log.Error("list course progress failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load progress")
+		writeErr(w, http.StatusInternalServerError, "could not load progress")
 		return
 	}
 	defer rows.Close()
@@ -100,12 +100,12 @@ func (h *CourseProgressHandler) list(w http.ResponseWriter, r *http.Request, use
 		var p courseProgressRow
 		if err := rows.Scan(&p.CourseKey, &p.MaxIndex, &p.LastLesson); err != nil {
 			h.Log.Error("scan course progress failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load progress")
+			writeErr(w, http.StatusInternalServerError, "could not load progress")
 			return
 		}
 		out = append(out, p)
 	}
-	h.json(w, http.StatusOK, map[string]any{"progress": out})
+	writeJSON(w, http.StatusOK, map[string]any{"progress": out})
 }
 
 // PUT /api/course-progress/{courseKey} {max_index, last_lesson}
@@ -115,7 +115,7 @@ func (h *CourseProgressHandler) list(w http.ResponseWriter, r *http.Request, use
 // follows the latest write; an empty value leaves it unchanged.
 func (h *CourseProgressHandler) save(w http.ResponseWriter, r *http.Request, userID, courseKey string) {
 	if !courseKeyPattern.MatchString(courseKey) {
-		h.fail(w, http.StatusBadRequest, "invalid course key")
+		writeErr(w, http.StatusBadRequest, "invalid course key")
 		return
 	}
 	var body struct {
@@ -123,11 +123,11 @@ func (h *CourseProgressHandler) save(w http.ResponseWriter, r *http.Request, use
 		LastLesson string `json:"last_lesson"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid body")
+		writeErr(w, http.StatusBadRequest, "invalid body")
 		return
 	}
 	if body.MaxIndex < 0 || body.MaxIndex > maxLessonIndex || len(body.LastLesson) > maxLessonIDSize {
-		h.fail(w, http.StatusBadRequest, "progress out of range")
+		writeErr(w, http.StatusBadRequest, "progress out of range")
 		return
 	}
 
@@ -144,17 +144,8 @@ func (h *CourseProgressHandler) save(w http.ResponseWriter, r *http.Request, use
 	).Scan(&saved.CourseKey, &saved.MaxIndex, &saved.LastLesson)
 	if err != nil {
 		h.Log.Error("save course progress failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not save progress")
+		writeErr(w, http.StatusInternalServerError, "could not save progress")
 		return
 	}
-	h.json(w, http.StatusOK, saved)
-}
-
-func (h *CourseProgressHandler) json(w http.ResponseWriter, code int, v any) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (h *CourseProgressHandler) fail(w http.ResponseWriter, code int, msg string) {
-	h.json(w, code, map[string]string{"error": msg})
+	writeJSON(w, http.StatusOK, saved)
 }

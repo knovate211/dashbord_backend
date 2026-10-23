@@ -30,36 +30,36 @@ func (h *AdminHandler) handleDuplicateTest(w http.ResponseWriter, r *http.Reques
 		Title string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
 	if req.Title == "" || len(req.Title) > 200 {
-		h.jsonErr(w, http.StatusBadRequest, "title is required (at most 200 characters)")
+		writeErr(w, http.StatusBadRequest, "title is required (at most 200 characters)")
 		return
 	}
 
 	ctx := r.Context()
 	tx, err := h.Pool.Begin(ctx)
 	if err != nil {
-		h.jsonErr(w, http.StatusInternalServerError, "could not duplicate the test")
+		writeErr(w, http.StatusInternalServerError, "could not duplicate the test")
 		return
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	newID, sections, questions, err := duplicateTestTx(ctx, tx, srcID, req.Title, middleware.UserIDFromContext(ctx))
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.jsonErr(w, http.StatusNotFound, "test not found")
+		writeErr(w, http.StatusNotFound, "test not found")
 		return
 	}
 	if err != nil {
 		h.Log.Error("duplicate test failed", zap.String("src", srcID), zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "could not duplicate the test")
+		writeErr(w, http.StatusInternalServerError, "could not duplicate the test")
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
 		h.Log.Error("commit duplicate test failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "could not duplicate the test")
+		writeErr(w, http.StatusInternalServerError, "could not duplicate the test")
 		return
 	}
 
@@ -67,7 +67,7 @@ func (h *AdminHandler) handleDuplicateTest(w http.ResponseWriter, r *http.Reques
 		"source_id": srcID, "new_id": newID, "title": req.Title,
 		"sections": sections, "questions": questions,
 	})
-	h.json(w, http.StatusOK, map[string]any{"id": newID, "sections": sections, "questions": questions})
+	writeJSON(w, http.StatusOK, map[string]any{"id": newID, "sections": sections, "questions": questions})
 }
 
 func duplicateTestTx(ctx context.Context, tx pgx.Tx, srcID, title, actorID string) (newID string, sections, questions int, err error) {
@@ -149,7 +149,7 @@ func (h *AdminHandler) serveRecruiterLookup(w http.ResponseWriter, r *http.Reque
 		ORDER  BY company_id LIMIT 1
 	`, userID, r.URL.Query().Get("companyId")).Scan(&companyID)
 	if err != nil {
-		h.jsonErr(w, http.StatusForbidden, "not a member of this company")
+		writeErr(w, http.StatusForbidden, "not a member of this company")
 		return
 	}
 	h.mcqFacets(w, r, companyID)
@@ -180,7 +180,7 @@ func (h *AdminHandler) mcqFacets(w http.ResponseWriter, r *http.Request, company
 		cond += " AND course_id = $2"
 		args = append(args, course)
 	}
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"course":     h.facetQuery(ctx, `SELECT course_id, '', COUNT(*)::int FROM mcq_questions WHERE is_active AND `+scope+` GROUP BY course_id ORDER BY 1`, companyID),
 		"topic":      h.facetQuery(ctx, `SELECT topic, '', COUNT(*)::int FROM mcq_questions WHERE `+cond+` GROUP BY topic ORDER BY 3 DESC`, args...),
 		"difficulty": h.facetQuery(ctx, `SELECT difficulty, '', COUNT(*)::int FROM mcq_questions WHERE `+cond+` GROUP BY difficulty ORDER BY 1`, args...),

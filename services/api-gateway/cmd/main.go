@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +22,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	pkgauth "github.com/knovate211/pkg/auth"
+	pkgconfig "github.com/knovate211/pkg/config"
+	pkgdb "github.com/knovate211/pkg/database"
 	pkglog "github.com/knovate211/pkg/logger"
 	assessmentv1 "github.com/knovate211/proto/assessment/v1"
 	"github.com/knovate211/proto/codec"
@@ -49,7 +50,11 @@ func main() {
 	// ── Admin DB Pool (shared DATABASE_URL with user-service) ─────────────────
 	var adminPool *pgxpool.Pool
 	if cfg.databaseURL != "" {
-		pool, err := pgxpool.New(context.Background(), cfg.databaseURL)
+		// About a dozen handlers share this pool. pgxpool's default cap is the
+		// CPU count (4 on a small server), which queued requests under load and
+		// skipped the startup ping. The cap stays well under the services' own
+		// pools, since all of them share the database's connection limit.
+		pool, err := pkgdb.NewPostgresPoolWithMax(context.Background(), cfg.databaseURL, int32(pkgconfig.EnvInt("GATEWAY_DB_MAX_CONNS", 10)))
 		if err != nil {
 			log.Warn("admin pool init failed — admin endpoints disabled", zap.Error(err))
 		} else {
@@ -116,6 +121,7 @@ func main() {
 		User: &resolvers.UserClients{
 			UserSvc: userSvcClient,
 			Log:     log,
+			Pool:    adminPool,
 		},
 		Jobs: resolvers.NewJobClients(),
 		Assessments: &resolvers.AssessmentClients{
@@ -155,6 +161,8 @@ func main() {
 			Log:    log,
 			Mailer: resolvers.NewUserMailer(cfg.appBaseURL, log),
 			Exec:   executionv1.NewExecutionServiceClient(execConn),
+			// Saving or deleting a problem drops problem-service's cached copies.
+			Problems: problemv1.NewProblemServiceClient(probConn),
 		}
 		if err := adminHandler.EnsureAuditTable(context.Background()); err != nil {
 			log.Error("admin audit table init failed — admin actions will not be logged", zap.Error(err))
@@ -193,7 +201,7 @@ func main() {
 			// list distinguishes a candidate about to sit the test from one who
 			// walked away weeks ago.
 			scholarshipHandler.StartExpirySweeper(context.Background(),
-				time.Duration(envInt("SCHOLARSHIP_SWEEP_MIN", 15))*time.Minute)
+				time.Duration(pkgconfig.EnvInt("SCHOLARSHIP_SWEEP_MIN", 15))*time.Minute)
 			log.Info("scholarship funnel registered at /api/scholarship/",
 				zap.String("app_base_url", cfg.appBaseURL))
 		}
@@ -246,6 +254,15 @@ func main() {
 			log.Info("course progress registered at /api/course-progress")
 		}
 
+		// The course pages' AI mentor chat. The Gemini key stays on the server.
+		aiMentorHandler := resolvers.NewAIMentorHandler(log)
+		mux.Handle("/api/ai-mentor/", aiMentorHandler)
+		if aiMentorHandler.Enabled() {
+			log.Info("ai mentor registered at /api/ai-mentor/")
+		} else {
+			log.Warn("GEMINI_API_KEY not set — the AI mentor answers 503")
+		}
+
 		// The referral programme. Creating a link and opening one are public —
 		// a referrer may have no account and their friend certainly does not.
 		referralHandler, err := resolvers.NewReferralHandler(
@@ -290,7 +307,7 @@ func main() {
 			// admin list separates a candidate about to sit their exam from one
 			// who paid and walked away.
 			certificationHandler.StartExpirySweeper(context.Background(),
-				time.Duration(envInt("CERTIFICATION_SWEEP_MIN", 15))*time.Minute)
+				time.Duration(pkgconfig.EnvInt("CERTIFICATION_SWEEP_MIN", 15))*time.Minute)
 			log.Info("certification exams registered at /api/certification/",
 				zap.String("site_base_url", cfg.siteBaseURL))
 		}
@@ -424,28 +441,28 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		httpPort:               env("HTTP_PORT", "8080"),
-		problemServiceAddr:     env("PROBLEM_SERVICE_ADDR", "localhost:50051"),
-		submissionServiceAddr:  env("SUBMISSION_SERVICE_ADDR", "localhost:50053"),
-		executionServiceAddr:   env("EXECUTION_SERVICE_ADDR", "localhost:50052"),
-		progressServiceAddr:    env("PROGRESS_SERVICE_ADDR", "localhost:50054"),
-		assessmentServiceAddr:  env("ASSESSMENT_SERVICE_ADDR", "localhost:50056"),
-		userServiceAddr:        env("USER_SERVICE_ADDR", "localhost:50055"),
-		notificationServiceURL: env("NOTIFICATION_SERVICE_URL", "http://localhost:8081"),
-		jwtSecret:              env("JWT_SECRET", defaultJWTSecret),
-		jwtPublicKey:           env("JWT_PUBLIC_KEY", ""),
-		allowedOrigins:         env("ALLOWED_ORIGINS", "*"),
+		httpPort:               pkgconfig.Env("HTTP_PORT", "8080"),
+		problemServiceAddr:     pkgconfig.Env("PROBLEM_SERVICE_ADDR", "localhost:50051"),
+		submissionServiceAddr:  pkgconfig.Env("SUBMISSION_SERVICE_ADDR", "localhost:50053"),
+		executionServiceAddr:   pkgconfig.Env("EXECUTION_SERVICE_ADDR", "localhost:50052"),
+		progressServiceAddr:    pkgconfig.Env("PROGRESS_SERVICE_ADDR", "localhost:50054"),
+		assessmentServiceAddr:  pkgconfig.Env("ASSESSMENT_SERVICE_ADDR", "localhost:50056"),
+		userServiceAddr:        pkgconfig.Env("USER_SERVICE_ADDR", "localhost:50055"),
+		notificationServiceURL: pkgconfig.Env("NOTIFICATION_SERVICE_URL", "http://localhost:8081"),
+		jwtSecret:              pkgconfig.Env("JWT_SECRET", defaultJWTSecret),
+		jwtPublicKey:           pkgconfig.Env("JWT_PUBLIC_KEY", ""),
+		allowedOrigins:         pkgconfig.Env("ALLOWED_ORIGINS", "*"),
 		// Where a scholarship applicant is sent to sit their test. Must be the
 		// portal's public origin in production — the claim link is built from
 		// it, and a wrong value sends applicants nowhere.
-		appBaseURL: env("APP_BASE_URL", "http://localhost:5173"),
+		appBaseURL: pkgconfig.Env("APP_BASE_URL", "http://localhost:5173"),
 		// Where a certificate says it can be verified. Must be the marketing
 		// site's public origin in production, or every credential on a printed
 		// certificate points at a machine nobody can reach.
-		siteBaseURL: env("SITE_BASE_URL", "http://localhost:3000"),
-		databaseURL: env("DATABASE_URL", ""), // shared with user-service
-		devMode:     env("DEV_MODE", "true") == "true",
-		logLevel:    env("LOG_LEVEL", "info"),
+		siteBaseURL: pkgconfig.Env("SITE_BASE_URL", "http://localhost:3000"),
+		databaseURL: pkgconfig.Env("DATABASE_URL", ""), // shared with user-service
+		devMode:     pkgconfig.Env("DEV_MODE", "true") == "true",
+		logLevel:    pkgconfig.Env("LOG_LEVEL", "info"),
 	}
 }
 
@@ -475,25 +492,6 @@ func (c config) checkProduction() error {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
-}
-
-// envInt reads a positive integer setting, falling back when unset or nonsense.
-// A zero or negative value would turn a periodic job into a busy loop, so it
-// degrades to the default rather than to whatever was typed.
-func envInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return fallback
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 // ─── Login Handler ──────────────────────────────────────────────

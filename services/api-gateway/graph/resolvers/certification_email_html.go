@@ -13,9 +13,7 @@ import (
 // is escaped — the name comes from a public form.
 func certificationLinkHTML(name, examTitle, examURL, expiresOn string) string {
 	esc := template.HTMLEscapeString
-	return fmt.Sprintf(`<!doctype html>
-<html><body style="margin:0;padding:24px;background:#f7f3ec;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#2b2620;">
-  <table role="presentation" width="100%%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:12px;">
+	return plainEmail(fmt.Sprintf(`
     <tr><td style="padding:32px 32px 8px;">
       <p style="margin:0 0 4px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#b5701f;font-weight:700;">Knovate Certification</p>
       <h1 style="margin:0;font-size:24px;line-height:1.25;color:#2b2620;">Your exam is ready</h1>
@@ -44,11 +42,8 @@ func certificationLinkHTML(name, examTitle, examURL, expiresOn string) string {
       <p style="margin:0 0 14px;">Pass and your certificate is issued straight away, with a link an employer can verify.</p>
       <p style="margin:0;color:#6c6455;font-size:13px;">If the button does not work, paste this into your browser:<br>
         <span style="word-break:break-all;color:#b5701f;">%s</span></p>
-    </td></tr>
-  </table>
-  <p style="max-width:560px;margin:16px auto 0;font-size:12px;color:#8a8175;text-align:center;">You are receiving this because you registered for a Knovate certification exam.</p>
-</body></html>`,
-		esc(name), esc(examTitle), esc(examURL), esc(expiresOn), esc(examURL))
+    </td></tr>`,
+		esc(name), esc(examTitle), esc(examURL), esc(expiresOn), esc(examURL)), "  <p style=\"max-width:560px;margin:16px auto 0;font-size:12px;color:#8a8175;text-align:center;\">You are receiving this because you registered for a Knovate certification exam.</p>\n")
 }
 
 // certificationResendText is the plain-text body used when staff resend a link.

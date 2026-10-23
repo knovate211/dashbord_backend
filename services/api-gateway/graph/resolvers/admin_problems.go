@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 // Coding-problem authoring for the admin panel.
@@ -163,20 +164,20 @@ func (h *AdminHandler) generateStarters(ctx context.Context, s problemSignature)
 func (h *AdminHandler) handleProblemStarters(w http.ResponseWriter, r *http.Request) {
 	var s problemSignature
 	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	starters, msg, err := h.generateStarters(r.Context(), s)
 	if err != nil {
 		h.Log.Error("generate starters failed", zap.Error(err))
-		h.jsonErr(w, http.StatusBadGateway, "could not reach the code generator")
+		writeErr(w, http.StatusBadGateway, "could not reach the code generator")
 		return
 	}
 	if msg != "" {
-		h.jsonErr(w, http.StatusBadRequest, msg)
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{"starters": starters})
+	writeJSON(w, http.StatusOK, map[string]any{"starters": starters})
 }
 
 // GET /api/admin/problems?search&course&difficulty&page&page_size
@@ -221,7 +222,7 @@ func (h *AdminHandler) handleListProblems(w http.ResponseWriter, r *http.Request
 		SELECT COUNT(*) FROM problems p LEFT JOIN problem_signatures s ON s.problem_id = p.id WHERE `+where,
 		args...).Scan(&total); err != nil {
 		h.Log.Error("count problems failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to load problems")
+		writeErr(w, http.StatusInternalServerError, "failed to load problems")
 		return
 	}
 
@@ -240,7 +241,7 @@ func (h *AdminHandler) handleListProblems(w http.ResponseWriter, r *http.Request
 		LIMIT $%d OFFSET $%d`, where, len(args)-1, len(args)), args...)
 	if err != nil {
 		h.Log.Error("list problems failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to load problems")
+		writeErr(w, http.StatusInternalServerError, "failed to load problems")
 		return
 	}
 	defer rows.Close()
@@ -266,13 +267,13 @@ func (h *AdminHandler) handleListProblems(w http.ResponseWriter, r *http.Request
 		if err := rows.Scan(&x.ID, &x.Title, &x.Difficulty, &x.Topic, &x.CourseID, &x.IsPrivate, &x.IoMode,
 			&x.Editable, &x.TestCases, &x.UsedInTests, &x.Verified, &at); err != nil {
 			h.Log.Error("scan problem failed", zap.Error(err))
-			h.jsonErr(w, http.StatusInternalServerError, "failed to load problems")
+			writeErr(w, http.StatusInternalServerError, "failed to load problems")
 			return
 		}
 		x.UpdatedAt = at.Format(time.RFC3339)
 		out = append(out, x)
 	}
-	h.json(w, http.StatusOK, map[string]any{"problems": out, "total": total})
+	writeJSON(w, http.StatusOK, map[string]any{"problems": out, "total": total})
 }
 
 // GET /api/admin/problems/{id}
@@ -293,12 +294,12 @@ func (h *AdminHandler) handleGetProblem(w http.ResponseWriter, r *http.Request, 
 		WHERE  p.id = $1::uuid`, id).Scan(&p.Title, &p.Difficulty, &p.Topic, &p.CourseID, &p.Statement,
 		&p.IsPrivate, &ioMode, &entry, &params, &ret, &compare, &kind, &usedIn)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.jsonErr(w, http.StatusNotFound, "problem not found")
+		writeErr(w, http.StatusNotFound, "problem not found")
 		return
 	}
 	if err != nil {
 		h.Log.Error("get problem failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to load the problem")
+		writeErr(w, http.StatusInternalServerError, "failed to load the problem")
 		return
 	}
 	if entry != nil {
@@ -330,7 +331,7 @@ func (h *AdminHandler) handleGetProblem(w http.ResponseWriter, r *http.Request, 
 	}
 
 	editable := ioMode == "function" && entry != nil && deref(kind) == "function"
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"problem": p, "id": id, "io_mode": ioMode, "editable": editable,
 		"used_in_tests": usedIn, "reference_solutions": refs,
 	})
@@ -347,11 +348,11 @@ func deref(s *string) string {
 func (h *AdminHandler) handleSaveProblem(w http.ResponseWriter, r *http.Request, id string) {
 	var p problemInput
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if msg := p.validate(); msg != "" {
-		h.jsonErr(w, http.StatusBadRequest, msg)
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 	ctx := r.Context()
@@ -359,28 +360,29 @@ func (h *AdminHandler) handleSaveProblem(w http.ResponseWriter, r *http.Request,
 	starters, msg, err := h.generateStarters(ctx, p.Signature)
 	if err != nil {
 		h.Log.Error("generate starters failed", zap.Error(err))
-		h.jsonErr(w, http.StatusBadGateway, "could not reach the code generator — the problem was not saved")
+		writeErr(w, http.StatusBadGateway, "could not reach the code generator — the problem was not saved")
 		return
 	}
 	if msg != "" {
-		h.jsonErr(w, http.StatusBadRequest, msg)
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 
 	tx, err := h.Pool.Begin(ctx)
 	if err != nil {
-		h.jsonErr(w, http.StatusInternalServerError, "could not save the problem")
+		writeErr(w, http.StatusInternalServerError, "could not save the problem")
 		return
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	creating := id == ""
+	var slug string
 	if creating {
 		err = tx.QueryRow(ctx, `
 			INSERT INTO problems (slug, title, difficulty, topic, xp, statement, is_private, io_mode, course_id)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, 'function', $8)
-			RETURNING id::text`,
-			uniqueSlug(p.Title), p.Title, p.Difficulty, p.Topic, xpFor(p.Difficulty), p.Statement, p.IsPrivate, p.CourseID).Scan(&id)
+			RETURNING id::text, slug`,
+			uniqueSlug(p.Title), p.Title, p.Difficulty, p.Topic, xpFor(p.Difficulty), p.Statement, p.IsPrivate, p.CourseID).Scan(&id, &slug)
 	} else {
 		// Only editable (function, signature-backed) problems may be rewritten.
 		var ok bool
@@ -388,19 +390,20 @@ func (h *AdminHandler) handleSaveProblem(w http.ResponseWriter, r *http.Request,
 			SELECT p.io_mode = 'function' AND COALESCE(s.kind, 'function') = 'function'
 			FROM problems p LEFT JOIN problem_signatures s ON s.problem_id = p.id WHERE p.id = $1::uuid`, id).Scan(&ok)
 		if errors.Is(err, pgx.ErrNoRows) {
-			h.jsonErr(w, http.StatusNotFound, "problem not found")
+			writeErr(w, http.StatusNotFound, "problem not found")
 			return
 		}
 		if err == nil && !ok {
-			h.jsonErr(w, http.StatusBadRequest, "this problem is not a function-mode problem and cannot be edited here")
+			writeErr(w, http.StatusBadRequest, "this problem is not a function-mode problem and cannot be edited here")
 			return
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, `
+			err = tx.QueryRow(ctx, `
 				UPDATE problems SET title = $2, difficulty = $3, topic = $4, xp = $5, statement = $6,
 				       is_private = $7, course_id = $8, updated_at = now()
-				WHERE id = $1::uuid`,
-				id, p.Title, p.Difficulty, p.Topic, xpFor(p.Difficulty), p.Statement, p.IsPrivate, p.CourseID)
+				WHERE id = $1::uuid
+				RETURNING slug`,
+				id, p.Title, p.Difficulty, p.Topic, xpFor(p.Difficulty), p.Statement, p.IsPrivate, p.CourseID).Scan(&slug)
 		}
 	}
 	if err == nil {
@@ -408,20 +411,21 @@ func (h *AdminHandler) handleSaveProblem(w http.ResponseWriter, r *http.Request,
 	}
 	if err != nil {
 		h.Log.Error("save problem failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "could not save the problem")
+		writeErr(w, http.StatusInternalServerError, "could not save the problem")
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
-		h.jsonErr(w, http.StatusInternalServerError, "could not save the problem")
+		writeErr(w, http.StatusInternalServerError, "could not save the problem")
 		return
 	}
+	h.invalidateProblem(ctx, id, slug)
 
 	action := "problem.updated"
 	if creating {
 		action = "problem.created"
 	}
 	h.audit(ctx, action, "", "", map[string]any{"problem_id": id, "title": p.Title, "test_cases": len(p.TestCases)})
-	h.json(w, http.StatusOK, map[string]any{"id": id})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id})
 }
 
 // writeProblemParts replaces everything hanging off the problem row. Replacing
@@ -510,11 +514,11 @@ func (h *AdminHandler) handleVerifyProblem(w http.ResponseWriter, r *http.Reques
 		Code     string `json:"code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Code) == "" {
-		h.jsonErr(w, http.StatusBadRequest, "language and code are required")
+		writeErr(w, http.StatusBadRequest, "language and code are required")
 		return
 	}
 	if h.Exec == nil {
-		h.jsonErr(w, http.StatusServiceUnavailable, "execution service not configured")
+		writeErr(w, http.StatusServiceUnavailable, "execution service not configured")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
@@ -522,7 +526,7 @@ func (h *AdminHandler) handleVerifyProblem(w http.ResponseWriter, r *http.Reques
 	resp, err := h.Exec.VerifySolution(ctx, &executionv1.VerifySolutionRequest{ProblemId: id, Language: req.Language, Code: req.Code})
 	if err != nil {
 		h.Log.Error("verify solution failed", zap.Error(err))
-		h.jsonErr(w, http.StatusBadGateway, "could not run the solution: "+err.Error())
+		writeErr(w, http.StatusBadGateway, "could not run the solution: "+err.Error())
 		return
 	}
 	allPassed := len(resp.TestResults) > 0
@@ -538,7 +542,7 @@ func (h *AdminHandler) handleVerifyProblem(w http.ResponseWriter, r *http.Reques
 			h.Log.Warn("store reference solution failed", zap.Error(err))
 		}
 	}
-	h.json(w, http.StatusOK, map[string]any{"all_passed": allPassed, "result": resp})
+	writeJSON(w, http.StatusOK, map[string]any{"all_passed": allPassed, "result": resp})
 }
 
 // DELETE /api/admin/problems/{id} — refused while a test uses the problem or
@@ -552,24 +556,40 @@ func (h *AdminHandler) handleDeleteProblem(w http.ResponseWriter, r *http.Reques
 		       (SELECT COUNT(*) FROM section_questions WHERE problem_id = p.id)::int,
 		       (SELECT COUNT(*) FROM attempt_questions WHERE problem_id = p.id)::int
 		FROM problems p WHERE p.id = $1::uuid`, id).Scan(&title, &used, &answered); errors.Is(err, pgx.ErrNoRows) {
-		h.jsonErr(w, http.StatusNotFound, "problem not found")
+		writeErr(w, http.StatusNotFound, "problem not found")
 		return
 	} else if err != nil {
-		h.jsonErr(w, http.StatusInternalServerError, "could not delete the problem")
+		writeErr(w, http.StatusInternalServerError, "could not delete the problem")
 		return
 	}
 	if used > 0 || answered > 0 {
-		h.jsonErr(w, http.StatusConflict, fmt.Sprintf(
+		writeErr(w, http.StatusConflict, fmt.Sprintf(
 			"%q is used in %d test section(s) and %d attempt(s) — remove it from those tests first", title, used, answered))
 		return
 	}
-	if _, err := h.Pool.Exec(ctx, `DELETE FROM problems WHERE id = $1::uuid`, id); err != nil {
+	var slug string
+	if err := h.Pool.QueryRow(ctx, `DELETE FROM problems WHERE id = $1::uuid RETURNING slug`, id).Scan(&slug); err != nil {
 		h.Log.Error("delete problem failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "could not delete the problem")
+		writeErr(w, http.StatusInternalServerError, "could not delete the problem")
 		return
 	}
+	h.invalidateProblem(ctx, id, slug)
 	h.audit(ctx, "problem.deleted", "", "", map[string]any{"problem_id": id, "title": title})
-	h.json(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+}
+
+// invalidateProblem asks problem-service to drop its cached copies of a
+// problem just written here. Best effort: the write has already committed, and
+// if the call fails the cache still expires on its own within its TTL.
+func (h *AdminHandler) invalidateProblem(ctx context.Context, id, slug string) {
+	if h.Problems == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if _, err := h.Problems.InvalidateProblem(ctx, &problemv1.InvalidateProblemRequest{Id: id, Slug: slug}); err != nil {
+		h.Log.Warn("problem cache invalidation failed", zap.String("problem_id", id), zap.Error(err))
+	}
 }
 
 var slugStrip = regexp.MustCompile(`[^a-z0-9]+`)

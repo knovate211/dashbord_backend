@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
+	pkgconfig "github.com/knovate211/pkg/config"
 	pkgdb "github.com/knovate211/pkg/database"
 	pkglog "github.com/knovate211/pkg/logger"
 	"github.com/knovate211/proto/codec" // register JSON codec
@@ -64,7 +65,6 @@ func main() {
 	}
 	log.Info("quiz tables verified and seeded successfully")
 
-
 	h := handler.New(repo, log)
 
 	// ── gRPC server ──────────────────────────────────────────────────────────
@@ -103,15 +103,8 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		postgresDSN: env("POSTGRES_DSN", "postgres://skillofide:password@localhost:5432/skillofide?sslmode=disable"),
-		grpcPort:    env("GRPC_PORT", "50055"),
-		logLevel:    env("LOG_LEVEL", "info"),
+		postgresDSN: pkgconfig.Env("POSTGRES_DSN", "postgres://skillofide:password@localhost:5432/skillofide?sslmode=disable"),
+		grpcPort:    pkgconfig.Env("GRPC_PORT", "50055"),
+		logLevel:    pkgconfig.Env("LOG_LEVEL", "info"),
 	}
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

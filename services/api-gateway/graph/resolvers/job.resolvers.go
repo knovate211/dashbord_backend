@@ -1,6 +1,7 @@
 package resolvers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/graphql-go/graphql"
@@ -23,20 +25,71 @@ const (
 	// JSearch returns a fixed-size page; used only to guess whether another
 	// page exists, since the API reports no total count.
 	jsearchPageSize = 10
+
+	// JSearch is billed per request and the same few searches ("Software
+	// Engineer", the chips on the Placement page) are repeated by every
+	// learner, so results are reused for a while. Listings a few minutes old
+	// are as good as new for a job board.
+	jobCacheTTL     = 10 * time.Minute
+	jobCacheEntries = 500
 )
 
 type JobClients struct {
-	apiKey string
-	http   *http.Client
+	apiKey   string
+	endpoint string
+	http     *http.Client
+
+	mu    sync.Mutex
+	cache map[string]cachedJobs
+	now   func() time.Time
+}
+
+type cachedJobs struct {
+	at     time.Time
+	result map[string]interface{}
 }
 
 func NewJobClients() *JobClients {
 	return &JobClients{
 		// RapidAPI key. Without it the resolver returns a clear setup error
 		// rather than an opaque 401 from upstream.
-		apiKey: os.Getenv("JSEARCH_API_KEY"),
-		http:   &http.Client{Timeout: 60 * time.Second},
+		apiKey:   os.Getenv("JSEARCH_API_KEY"),
+		endpoint: jsearchEndpoint,
+		http:     &http.Client{Timeout: 60 * time.Second},
+		cache:    map[string]cachedJobs{},
+		now:      time.Now,
 	}
+}
+
+func (c *JobClients) cached(key string) (map[string]interface{}, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.cache[key]
+	if !ok || c.now().Sub(e.at) > jobCacheTTL {
+		return nil, false
+	}
+	return e.result, true
+}
+
+func (c *JobClients) store(key string, result map[string]interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.cache) >= jobCacheEntries {
+		// Drop what has expired; if that frees nothing, drop the oldest.
+		var oldestKey string
+		var oldest time.Time
+		for k, e := range c.cache {
+			if c.now().Sub(e.at) > jobCacheTTL {
+				delete(c.cache, k)
+			} else if oldestKey == "" || e.at.Before(oldest) {
+				oldestKey, oldest = k, e.at
+			}
+		}
+		if len(c.cache) >= jobCacheEntries {
+			delete(c.cache, oldestKey)
+		}
+	}
+	c.cache[key] = cachedJobs{at: c.now(), result: result}
 }
 
 // jsearchJob is the subset of JSearch's response we surface. Salary and
@@ -84,7 +137,21 @@ func (c *JobClients) SearchJobs(p graphql.ResolveParams) (interface{}, error) {
 		query = fmt.Sprintf("%s in %s", query, loc)
 	}
 
-	u, _ := url.Parse(jsearchEndpoint)
+	key := fmt.Sprintf("%s|%d", strings.ToLower(query), page)
+	if result, ok := c.cached(key); ok {
+		return result, nil
+	}
+	result, err := c.fetch(p.Context, query, page)
+	if err != nil {
+		return nil, err
+	}
+	c.store(key, result)
+	return result, nil
+}
+
+// fetch asks JSearch for one page of results and maps them onto the Job type.
+func (c *JobClients) fetch(ctx context.Context, query string, page int) (map[string]interface{}, error) {
+	u, _ := url.Parse(c.endpoint)
 	q := u.Query()
 	q.Set("query", query)
 	q.Set("page", fmt.Sprintf("%d", page))
@@ -92,7 +159,7 @@ func (c *JobClients) SearchJobs(p graphql.ResolveParams) (interface{}, error) {
 	q.Set("date_posted", "month")
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(p.Context, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}

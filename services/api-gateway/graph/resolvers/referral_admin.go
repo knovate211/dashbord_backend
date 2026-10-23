@@ -35,27 +35,27 @@ func (h *ReferralHandler) GetProgram(w http.ResponseWriter, r *http.Request) {
 	p, err := h.program(r.Context())
 	if err != nil {
 		h.Log.Error("load referral program failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the programme settings")
+		writeErr(w, http.StatusInternalServerError, "could not load the programme settings")
 		return
 	}
-	h.write(w, http.StatusOK, p)
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (h *ReferralHandler) UpdateProgram(w http.ResponseWriter, r *http.Request) {
 	var p referralProgram
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&p); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	switch {
 	case p.CourseRewardPaise < 0 || p.ExamRewardPaise < 0:
-		h.fail(w, http.StatusBadRequest, "rewards cannot be negative")
+		writeErr(w, http.StatusBadRequest, "rewards cannot be negative")
 		return
 	case p.FriendDiscountPercent < 0 || p.FriendDiscountPercent > 100:
-		h.fail(w, http.StatusBadRequest, "the friend discount must be between 0 and 100 percent")
+		writeErr(w, http.StatusBadRequest, "the friend discount must be between 0 and 100 percent")
 		return
 	case p.AttributionDays < 1 || p.AttributionDays > 365:
-		h.fail(w, http.StatusBadRequest, "the attribution window must be between 1 and 365 days")
+		writeErr(w, http.StatusBadRequest, "the attribution window must be between 1 and 365 days")
 		return
 	}
 
@@ -70,11 +70,11 @@ func (h *ReferralHandler) UpdateProgram(w http.ResponseWriter, r *http.Request) 
 		p.FriendDiscountCap, p.MinOrderPaise, p.MonthlyCapPaise, p.AttributionDays,
 		clip(p.TermsURL, 300)); err != nil {
 		h.Log.Error("update referral program failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not save the settings")
+		writeErr(w, http.StatusInternalServerError, "could not save the settings")
 		return
 	}
 	h.audit(r, "referral_program.update", "1", map[string]any{"active": p.IsActive})
-	h.write(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // ─── Referrers ────────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ func (h *ReferralHandler) ListReferrers(w http.ResponseWriter, r *http.Request) 
 	var total int
 	if err := h.Pool.QueryRow(r.Context(), "SELECT count(*) FROM referrers r "+where, args...).Scan(&total); err != nil {
 		h.Log.Error("count referrers failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load referrers")
+		writeErr(w, http.StatusInternalServerError, "could not load referrers")
 		return
 	}
 
@@ -137,7 +137,7 @@ func (h *ReferralHandler) ListReferrers(w http.ResponseWriter, r *http.Request) 
 	`, where, len(args)+1, len(args)+2), append(args, size, (page-1)*size)...)
 	if err != nil {
 		h.Log.Error("list referrers failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load referrers")
+		writeErr(w, http.StatusInternalServerError, "could not load referrers")
 		return
 	}
 	defer rows.Close()
@@ -150,14 +150,14 @@ func (h *ReferralHandler) ListReferrers(w http.ResponseWriter, r *http.Request) 
 		if err := rows.Scan(&x.ID, &x.Code, &x.Name, &x.Email, &x.Phone, &x.UpiID, &x.PAN,
 			&x.IsBlocked, &x.Notes, &created, &x.Clicks, &x.Conversions, &earned, &paid); err != nil {
 			h.Log.Error("scan referrer failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load referrers")
+			writeErr(w, http.StatusInternalServerError, "could not load referrers")
 			return
 		}
 		x.CreatedAt = created.UTC().Format(time.RFC3339)
 		x.EarnedRupees, x.PaidRupees, x.PendingRupees = earned/100, paid/100, (earned-paid)/100
 		out = append(out, x)
 	}
-	h.write(w, http.StatusOK, map[string]any{"referrers": out, "total": total, "page": page, "pageSize": size})
+	writeJSON(w, http.StatusOK, map[string]any{"referrers": out, "total": total, "page": page, "pageSize": size})
 }
 
 // UpdateReferrer records payout details and staff notes, and blocks abusers.
@@ -169,7 +169,7 @@ func (h *ReferralHandler) UpdateReferrer(w http.ResponseWriter, r *http.Request,
 		IsBlocked *bool   `json:"is_blocked"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	tag, err := h.Pool.Exec(r.Context(), `
@@ -183,17 +183,17 @@ func (h *ReferralHandler) UpdateReferrer(w http.ResponseWriter, r *http.Request,
 	`, id, clipPtr(req.UpiID, 120), clipPtr(req.PAN, 20), clipPtr(req.Notes, 2000), req.IsBlocked)
 	if err != nil {
 		h.Log.Error("update referrer failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not save the referrer")
+		writeErr(w, http.StatusInternalServerError, "could not save the referrer")
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		h.fail(w, http.StatusNotFound, "referrer not found")
+		writeErr(w, http.StatusNotFound, "referrer not found")
 		return
 	}
 	if req.IsBlocked != nil {
 		h.audit(r, "referrer.block", id, map[string]any{"blocked": *req.IsBlocked})
 	}
-	h.write(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // ─── Rewards ──────────────────────────────────────────────────────────────────
@@ -303,7 +303,7 @@ func (h *ReferralHandler) ListConversions(w http.ResponseWriter, r *http.Request
 		SELECT count(*), COALESCE(sum(v.reward_paise) FILTER (WHERE v.status IN ('pending','approved')), 0)
 		FROM   referral_conversions v JOIN referrers r ON r.id = v.referrer_id `+where, args...).Scan(&total, &owed); err != nil {
 		h.Log.Error("count referral conversions failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load rewards")
+		writeErr(w, http.StatusInternalServerError, "could not load rewards")
 		return
 	}
 
@@ -311,17 +311,17 @@ func (h *ReferralHandler) ListConversions(w http.ResponseWriter, r *http.Request
 		conversionQuery, where, len(args)+1, len(args)+2), append(args, size, (page-1)*size)...)
 	if err != nil {
 		h.Log.Error("list referral conversions failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load rewards")
+		writeErr(w, http.StatusInternalServerError, "could not load rewards")
 		return
 	}
 	defer rows.Close()
 	out, err := h.scanConversions(rows)
 	if err != nil {
 		h.Log.Error("scan referral conversions failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load rewards")
+		writeErr(w, http.StatusInternalServerError, "could not load rewards")
 		return
 	}
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"referrals": out, "total": total, "page": page, "pageSize": size,
 		// What finance actually wants to know before opening the screen.
 		"owedRupees": owed / 100,
@@ -336,13 +336,13 @@ func (h *ReferralHandler) ExportConversions(w http.ResponseWriter, r *http.Reque
 	rows, err := h.Pool.Query(r.Context(), conversionQuery+" "+where+" ORDER BY v.created_at DESC", args...)
 	if err != nil {
 		h.Log.Error("export referral conversions failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not export rewards")
+		writeErr(w, http.StatusInternalServerError, "could not export rewards")
 		return
 	}
 	defer rows.Close()
 	list, err := h.scanConversions(rows)
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not export rewards")
+		writeErr(w, http.StatusInternalServerError, "could not export rewards")
 		return
 	}
 
@@ -366,7 +366,7 @@ func (h *ReferralHandler) UpdateConversion(w http.ResponseWriter, r *http.Reques
 		PayoutRef string `json:"payout_ref"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	who := middleware.UserIDFromContext(r.Context())
@@ -380,7 +380,7 @@ func (h *ReferralHandler) UpdateConversion(w http.ResponseWriter, r *http.Reques
 			WHERE id = $1::uuid AND status = 'pending'`, id, who)
 	case "reject":
 		if strings.TrimSpace(req.Reason) == "" {
-			h.fail(w, http.StatusBadRequest, "give a reason — the referrer may ask why")
+			writeErr(w, http.StatusBadRequest, "give a reason — the referrer may ask why")
 			return
 		}
 		tag, err = h.exec(r, `
@@ -388,7 +388,7 @@ func (h *ReferralHandler) UpdateConversion(w http.ResponseWriter, r *http.Reques
 			WHERE id = $1::uuid AND status IN ('pending', 'approved')`, id, clip(req.Reason, 300), who)
 	case "pay":
 		if strings.TrimSpace(req.PayoutRef) == "" {
-			h.fail(w, http.StatusBadRequest, "record the UPI reference — it is the only proof this was paid")
+			writeErr(w, http.StatusBadRequest, "record the UPI reference — it is the only proof this was paid")
 			return
 		}
 		tag, err = h.exec(r, `
@@ -400,20 +400,20 @@ func (h *ReferralHandler) UpdateConversion(w http.ResponseWriter, r *http.Reques
 			UPDATE referral_conversions SET status = 'pending', reason = '', updated_at = now()
 			WHERE id = $1::uuid AND status = 'rejected'`, id)
 	default:
-		h.fail(w, http.StatusBadRequest, "unknown action")
+		writeErr(w, http.StatusBadRequest, "unknown action")
 		return
 	}
 	if err != nil {
 		h.Log.Error("update referral conversion failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update the reward")
+		writeErr(w, http.StatusInternalServerError, "could not update the reward")
 		return
 	}
 	if tag == 0 {
-		h.fail(w, http.StatusConflict, "that reward is not in a state this action can change")
+		writeErr(w, http.StatusConflict, "that reward is not in a state this action can change")
 		return
 	}
 	h.audit(r, "referral."+req.Action, id, map[string]any{"payout_ref": req.PayoutRef, "reason": req.Reason})
-	h.write(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // BulkUpdate applies one action to a list of rewards — the weekly payout run.
@@ -425,55 +425,56 @@ func (h *ReferralHandler) BulkUpdate(w http.ResponseWriter, r *http.Request) {
 		PayoutRef string   `json:"payout_ref"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if len(req.IDs) == 0 {
-		h.fail(w, http.StatusBadRequest, "select at least one reward")
+		writeErr(w, http.StatusBadRequest, "select at least one reward")
 		return
 	}
 	if len(req.IDs) > 500 {
-		h.fail(w, http.StatusBadRequest, "too many at once — filter and do it in pages")
+		writeErr(w, http.StatusBadRequest, "too many at once — filter and do it in pages")
 		return
 	}
 	who := middleware.UserIDFromContext(r.Context())
 
+	ids := onlyUUIDs(req.IDs)
 	var sql string
 	var args []any
 	switch req.Action {
 	case "approve":
 		sql = `UPDATE referral_conversions SET status = 'approved', approved_by = $2, approved_at = now(), updated_at = now()
-		       WHERE id::text = ANY($1) AND status = 'pending'`
-		args = []any{req.IDs, who}
+		       WHERE id = ANY($1) AND status = 'pending'`
+		args = []any{ids, who}
 	case "reject":
 		if strings.TrimSpace(req.Reason) == "" {
-			h.fail(w, http.StatusBadRequest, "give a reason")
+			writeErr(w, http.StatusBadRequest, "give a reason")
 			return
 		}
 		sql = `UPDATE referral_conversions SET status = 'rejected', reason = $2, approved_by = $3, approved_at = now(), updated_at = now()
-		       WHERE id::text = ANY($1) AND status IN ('pending', 'approved')`
-		args = []any{req.IDs, clip(req.Reason, 300), who}
+		       WHERE id = ANY($1) AND status IN ('pending', 'approved')`
+		args = []any{ids, clip(req.Reason, 300), who}
 	case "pay":
 		if strings.TrimSpace(req.PayoutRef) == "" {
-			h.fail(w, http.StatusBadRequest, "record a payout reference for this batch")
+			writeErr(w, http.StatusBadRequest, "record a payout reference for this batch")
 			return
 		}
 		sql = `UPDATE referral_conversions SET status = 'paid', payout_ref = $2, paid_at = now(), updated_at = now()
-		       WHERE id::text = ANY($1) AND status = 'approved'`
-		args = []any{req.IDs, clip(req.PayoutRef, 120)}
+		       WHERE id = ANY($1) AND status = 'approved'`
+		args = []any{ids, clip(req.PayoutRef, 120)}
 	default:
-		h.fail(w, http.StatusBadRequest, "unknown action")
+		writeErr(w, http.StatusBadRequest, "unknown action")
 		return
 	}
 
 	tag, err := h.Pool.Exec(r.Context(), sql, args...)
 	if err != nil {
 		h.Log.Error("bulk referral update failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update the rewards")
+		writeErr(w, http.StatusInternalServerError, "could not update the rewards")
 		return
 	}
 	h.audit(r, "referral.bulk_"+req.Action, "", map[string]any{"count": tag.RowsAffected()})
-	h.write(w, http.StatusOK, map[string]any{"success": true, "updated": tag.RowsAffected()})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "updated": tag.RowsAffected()})
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

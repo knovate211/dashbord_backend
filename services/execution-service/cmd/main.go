@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
+	pkgconfig "github.com/knovate211/pkg/config"
 	pkglog "github.com/knovate211/pkg/logger"
 	"github.com/knovate211/proto/codec"
 	executionv1 "github.com/knovate211/proto/execution/v1"
@@ -111,16 +112,9 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		grpcPort:           env("GRPC_PORT", "50052"),
-		problemServiceAddr: env("PROBLEM_SERVICE_ADDR", "localhost:50051"),
-		natsURL:            env("NATS_URL", nats.DefaultURL),
-		logLevel:           env("LOG_LEVEL", "info"),
+		grpcPort:           pkgconfig.Env("GRPC_PORT", "50052"),
+		problemServiceAddr: pkgconfig.Env("PROBLEM_SERVICE_ADDR", "localhost:50051"),
+		natsURL:            pkgconfig.Env("NATS_URL", nats.DefaultURL),
+		logLevel:           pkgconfig.Env("LOG_LEVEL", "info"),
 	}
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
