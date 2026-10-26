@@ -50,11 +50,11 @@ type EnrollHandler struct {
 	emailLimiter *rateLimiter
 }
 
-// courseFee is one plan's price for a course, in rupees.
+// courseFee is a course's one-time fee, in rupees. Every course is sold as a
+// single plan with everything included; scholarships are a percentage off it.
 type courseFee struct {
-	Name      string
-	SelfPaced int
-	MentorLed int
+	Name string
+	Fee  int
 }
 
 // courseFees is the authoritative price list for online payment. It MUST match
@@ -62,31 +62,30 @@ type courseFee struct {
 // also shows the amount this handler returns before the student pays, so a
 // drift is visible rather than silently charged.
 var courseFees = map[string]courseFee{
-	"5":                 {"Full Stack Development", 8999, 14999},
-	"1":                 {"Java Development", 8999, 14999},
-	"2":                 {"Front-End Technologies", 8999, 14999},
-	"4":                 {"Golang", 8999, 14999},
-	"genai":             {"GenAI & Forward Deployed Engineering", 11999, 18999},
-	"3":                 {"Mastering SQL", 4999, 7999},
-	"digital-marketing": {"Digital Marketing", 5999, 9999},
-	"seo":               {"AI SEO Specialist", 5999, 9999},
-	"testing":           {"Software Testing", 5999, 9999},
+	"5":                 {"Full Stack Development", 10000},
+	"1":                 {"Java Development", 10000},
+	"2":                 {"Front-End Technologies", 10000},
+	"4":                 {"Golang", 10000},
+	"genai":             {"GenAI & Forward Deployed Engineering", 10000},
+	"3":                 {"Mastering SQL", 10000},
+	"digital-marketing": {"Digital Marketing", 10000},
+	"seo":               {"AI SEO Specialist", 10000},
+	"testing":           {"Software Testing", 10000},
 }
+
+// The site used to sell Self-Paced and Mentor-Led separately. There is now one
+// plan, stored as "mentor"; "self" is still accepted so an old link checks out
+// at the same fee instead of failing. planNames also labels past orders.
+const soldPlan = "mentor"
 
 var planNames = map[string]string{"self": "Self-Paced", "mentor": "Mentor-Led"}
 
 func feeFor(courseID, plan string) (rupees int, courseName string, ok bool) {
 	f, found := courseFees[courseID]
-	if !found {
+	if !found || (plan != "self" && plan != "mentor") {
 		return 0, "", false
 	}
-	switch plan {
-	case "self":
-		return f.SelfPaced, f.Name, true
-	case "mentor":
-		return f.MentorLed, f.Name, true
-	}
-	return 0, "", false
+	return f.Fee, f.Name, true
 }
 
 // NewEnrollHandler wires the handler and ensures its table exists. Online
@@ -204,14 +203,13 @@ func (h *EnrollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *EnrollHandler) handleConfig(w http.ResponseWriter) {
 	type fee struct {
-		CourseID  string `json:"course_id"`
-		Name      string `json:"name"`
-		SelfPaced int    `json:"self_paced"`
-		MentorLed int    `json:"mentor_led"`
+		CourseID string `json:"course_id"`
+		Name     string `json:"name"`
+		Fee      int    `json:"fee"`
 	}
 	fees := []fee{}
 	for id, f := range courseFees {
-		fees = append(fees, fee{id, f.Name, f.SelfPaced, f.MentorLed})
+		fees = append(fees, fee{id, f.Name, f.Fee})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":   h.enabled(),
@@ -268,6 +266,7 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "unknown course or plan")
 		return
 	}
+	req.Plan = soldPlan
 
 	ctx := r.Context()
 	// Someone already on the course should sign in, not pay twice.
