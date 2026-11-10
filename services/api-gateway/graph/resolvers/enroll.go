@@ -63,14 +63,14 @@ type courseFee struct {
 // drift is visible rather than silently charged.
 var courseFees = map[string]courseFee{
 	"5":                 {"Full Stack Development", 10000},
-	"1":                 {"Java Development", 10000},
-	"2":                 {"Front-End Technologies", 10000},
-	"4":                 {"Golang", 10000},
+	"1":                 {"Java Development", 7000},
+	"2":                 {"Front-End Technologies", 8000},
+	"4":                 {"Golang", 6000},
 	"genai":             {"GenAI & Forward Deployed Engineering", 10000},
-	"3":                 {"Mastering SQL", 10000},
-	"digital-marketing": {"Digital Marketing", 10000},
-	"seo":               {"AI SEO Specialist", 10000},
-	"testing":           {"Software Testing", 10000},
+	"3":                 {"Mastering SQL", 6000},
+	"digital-marketing": {"Digital Marketing", 8000},
+	"seo":               {"AI SEO Specialist", 6000},
+	"testing":           {"Software Testing", 8000},
 }
 
 // The site used to sell Self-Paced and Mentor-Led separately. There is now one

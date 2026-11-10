@@ -11,11 +11,14 @@ func TestFeeFor(t *testing.T) {
 		ok           bool
 	}{
 		{"5", "self", 10000, true},
-		{"1", "mentor", 10000, true},
-		{"testing", "self", 10000, true},
-		{"digital-marketing", "mentor", 10000, true},
+		{"1", "mentor", 7000, true},
+		{"testing", "self", 8000, true},
+		{"digital-marketing", "mentor", 8000, true},
 		{"genai", "mentor", 10000, true},
-		{"3", "self", 10000, true},
+		{"3", "self", 6000, true},
+		{"2", "mentor", 8000, true},
+		{"4", "self", 6000, true},
+		{"seo", "mentor", 6000, true},
 		{"5", "gold", 0, false},
 		{"nope", "self", 0, false},
 	}
