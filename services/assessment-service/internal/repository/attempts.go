@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	mrand "math/rand"
+	"sort"
 	"strings"
 	"time"
 
@@ -87,7 +88,10 @@ func (r *Repo) ListAvailableAssessments(ctx context.Context, req *assessmentv1.L
 		       a.proctoring,
 		       COALESCE(i.token, ''),
 		       (SELECT COUNT(*) FROM attempts at
-		         WHERE at.assessment_id = a.id AND at.user_id = $1),
+		         WHERE at.assessment_id = a.id AND at.user_id = $1
+		           -- A paid registration starts a fresh allowance (see
+		           -- migration 007); NULL keeps the lifetime count.
+		           AND (i.attempts_since IS NULL OR at.started_at >= i.attempts_since)),
 		       COALESCE((SELECT at.id::text FROM attempts at
 		         WHERE at.assessment_id = a.id AND at.user_id = $1
 		           AND at.status = 'in_progress'
@@ -250,9 +254,12 @@ func (r *Repo) StartAttempt(ctx context.Context, req *assessmentv1.StartAttemptR
 	}
 
 	var used int32
-	if err := r.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM attempts WHERE assessment_id = $1 AND user_id = $2`,
-		req.AssessmentId, req.UserId).Scan(&used); err != nil {
+	if err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM attempts at
+		WHERE  at.assessment_id = $1 AND at.user_id = $2
+		  AND  at.started_at >= COALESCE(
+		         (SELECT attempts_since FROM assessment_invites WHERE id::text = $3), '-infinity')
+	`, req.AssessmentId, req.UserId, inviteID).Scan(&used); err != nil {
 		return "", fmt.Errorf("count attempts: %w", err)
 	}
 	if used >= maxInt32(a.MaxAttempts, 1) {
@@ -263,7 +270,14 @@ func (r *Repo) StartAttempt(ctx context.Context, req *assessmentv1.StartAttemptR
 	if err != nil {
 		return "", err
 	}
-	paper, err := r.buildPaper(ctx, a, seed)
+	// A second attempt should not hand back the same questions. Everything this
+	// candidate has already been shown on this paper is avoided where the bank
+	// or pool has enough unseen questions, and reused only to fill a shortfall.
+	seen, err := r.seenQuestions(ctx, req.AssessmentId, req.UserId)
+	if err != nil {
+		return "", err
+	}
+	paper, err := r.buildPaper(ctx, a, seed, seen)
 	if err != nil {
 		return "", err
 	}
@@ -460,7 +474,7 @@ type paperQuestion struct {
 // buildPaper draws and orders the questions for one attempt. Everything is
 // derived from the attempt's seed, so the same seed reproduces the same paper
 // exactly — which is what makes a disputed result reviewable.
-func (r *Repo) buildPaper(ctx context.Context, a *assessmentv1.Assessment, seed int64) ([]*paperQuestion, error) {
+func (r *Repo) buildPaper(ctx context.Context, a *assessmentv1.Assessment, seed int64, seen map[string]bool) ([]*paperQuestion, error) {
 	rng := mrand.New(mrand.NewSource(seed)) //nolint:gosec // deterministic by design, not security
 	paper := []*paperQuestion{}
 	order := int32(0)
@@ -482,6 +496,7 @@ func (r *Repo) buildPaper(ctx context.Context, a *assessmentv1.Assessment, seed 
 			}
 			if s.PickCount > 0 && int(s.PickCount) < len(picked) {
 				shuffle(rng, picked)
+				preferUnseen(picked, func(q *paperQuestion) bool { return seen[q.McqQuestionID] || seen[q.ProblemID] })
 				picked = picked[:s.PickCount]
 				// Drawn questions are equal-weight — see validateForPublish.
 				for _, q := range picked {
@@ -490,7 +505,7 @@ func (r *Repo) buildPaper(ctx context.Context, a *assessmentv1.Assessment, seed 
 			}
 
 		case s.PickCount > 0 && s.Kind == "mcq":
-			ids, err := r.drawFromBank(ctx, a.CompanyId, s, rng)
+			ids, err := r.drawFromBank(ctx, a.CompanyId, s, rng, seen)
 			if err != nil {
 				return nil, err
 			}
@@ -528,7 +543,7 @@ func (r *Repo) buildPaper(ctx context.Context, a *assessmentv1.Assessment, seed 
 // drawFromBank selects PickCount active bank questions matching the section's
 // filter. Candidates are fetched in a stable order and shuffled with the
 // attempt's seed so the draw stays reproducible.
-func (r *Repo) drawFromBank(ctx context.Context, companyID string, s *assessmentv1.Section, rng *mrand.Rand) ([]string, error) {
+func (r *Repo) drawFromBank(ctx context.Context, companyID string, s *assessmentv1.Section, rng *mrand.Rand, seen map[string]bool) ([]string, error) {
 	var clauses []string
 	var args []any
 	add := func(clause string, v any) {
@@ -584,7 +599,44 @@ func (r *Repo) drawFromBank(ctx context.Context, companyID string, s *assessment
 	}
 
 	rng.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
+	preferUnseen(ids, func(id string) bool { return seen[id] })
 	return ids[:s.PickCount], nil
+}
+
+// preferUnseen moves already-seen items behind unseen ones, keeping the
+// shuffled order within each group, so taking the first N picks unseen
+// questions first and falls back to seen ones only when there are too few.
+func preferUnseen[T any](items []T, isSeen func(T) bool) {
+	sort.SliceStable(items, func(i, j int) bool { return !isSeen(items[i]) && isSeen(items[j]) })
+}
+
+// seenQuestions returns every MCQ and coding problem this user has already
+// been given on this paper, across all their earlier attempts.
+func (r *Repo) seenQuestions(ctx context.Context, assessmentID, userID string) (map[string]bool, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT COALESCE(aq.mcq_question_id::text, ''), COALESCE(aq.problem_id::text, '')
+		FROM   attempt_questions aq
+		JOIN   attempts at ON at.id = aq.attempt_id
+		WHERE  at.assessment_id = $1 AND at.user_id = $2
+	`, assessmentID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("load seen questions: %w", err)
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var mcq, problem string
+		if err := rows.Scan(&mcq, &problem); err != nil {
+			return nil, fmt.Errorf("scan seen question: %w", err)
+		}
+		if mcq != "" {
+			seen[mcq] = true
+		}
+		if problem != "" {
+			seen[problem] = true
+		}
+	}
+	return seen, rows.Err()
 }
 
 // assignOptionOrder freezes the option sequence each candidate will see. When
@@ -1145,6 +1197,25 @@ func (r *Repo) RecordProctorEvent(ctx context.Context, req *assessmentv1.RecordP
 	}
 	if a.Status != "in_progress" {
 		// Late events are still worth keeping, but nothing more happens.
+		return &assessmentv1.RecordProctorEventResponse{IntegrityScore: a.IntegrityScore}, nil
+	}
+
+	// The candidate's browser writes this ledger, so treat it as untrusted:
+	// without bounds one tab could store megabytes per call, invent event names
+	// that read like verdicts in the reviewer's view, or flood the table.
+	req.Kind = cleanProctorKind(req.Kind)
+	if req.Kind == "" {
+		return &assessmentv1.RecordProctorEventResponse{IntegrityScore: a.IntegrityScore}, nil
+	}
+	req.Detail = clipRunes(req.Detail, maxProctorDetail)
+	var logged int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM proctor_events WHERE attempt_id = $1`, req.AttemptId).Scan(&logged); err != nil {
+		return nil, fmt.Errorf("count proctor events: %w", err)
+	}
+	countsTowardLimit := req.Kind == "tab_blur" || req.Kind == "fullscreen_exit"
+	if logged >= maxProctorEventsPerAttempt && !countsTowardLimit {
+		// Enough evidence; a breach that can end the test is always recorded.
 		return &assessmentv1.RecordProctorEventResponse{IntegrityScore: a.IntegrityScore}, nil
 	}
 

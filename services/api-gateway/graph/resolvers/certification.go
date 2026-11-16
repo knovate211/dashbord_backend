@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/mail"
 	"strconv"
@@ -255,6 +256,11 @@ type certExamPublic struct {
 	DurationMinutes int32   `json:"durationMinutes"`
 	TotalMarks      int32   `json:"totalMarks"`
 	PaperTitle      string  `json:"paperTitle"`
+	// The paper's own proctoring setting, so the site promises a camera only
+	// when the exam will actually ask for one.
+	CameraRequired bool `json:"cameraRequired"`
+	// Attempts one registration buys (the paper's max_attempts).
+	Attempts int32 `json:"attempts"`
 }
 
 // handleConfig lists the exams a visitor can actually buy right now: active,
@@ -264,7 +270,8 @@ type certExamPublic struct {
 func (h *CertificationHandler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.Pool.Query(r.Context(), `
 		SELECT c.slug, c.title, c.course_id, c.summary, c.price_paise, c.pass_percent, c.link_valid_days,
-		       a.title, a.duration_minutes, a.total_marks
+		       a.title, a.duration_minutes, a.total_marks,
+		       COALESCE((a.proctoring->>'webcam')::boolean, false), GREATEST(a.max_attempts, 1)
 		FROM   certification_exams c
 		JOIN   assessments a ON a.id = c.assessment_id
 		WHERE  c.is_active
@@ -285,7 +292,7 @@ func (h *CertificationHandler) handleConfig(w http.ResponseWriter, r *http.Reque
 		var e certExamPublic
 		var pricePaise int64
 		if err := rows.Scan(&e.Slug, &e.Title, &e.CourseID, &e.Summary, &pricePaise, &e.PassPercent,
-			&e.LinkValidDays, &e.PaperTitle, &e.DurationMinutes, &e.TotalMarks); err != nil {
+			&e.LinkValidDays, &e.PaperTitle, &e.DurationMinutes, &e.TotalMarks, &e.CameraRequired, &e.Attempts); err != nil {
 			h.Log.Error("scan certification exam failed", zap.Error(err))
 			writeErr(w, http.StatusInternalServerError, "could not load the exams, please try again")
 			return
@@ -738,14 +745,17 @@ func (h *CertificationHandler) provision(ctx context.Context, name, email, phone
 	// non-practice paper without one. Re-registering after a failed attempt
 	// refreshes the same row rather than accumulating invites.
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO assessment_invites (assessment_id, email, user_id, token, status, expires_at, sent_at)
-		VALUES ($1::uuid, $2, $3::uuid, $4, 'invited', $5, now())
+		INSERT INTO assessment_invites (assessment_id, email, user_id, token, status, expires_at, sent_at, attempts_since)
+		VALUES ($1::uuid, $2, $3::uuid, $4, 'invited', $5, now(), now())
 		ON CONFLICT (assessment_id, email) DO UPDATE
-		   SET user_id    = EXCLUDED.user_id,
-		       token      = EXCLUDED.token,
-		       status     = 'invited',
-		       expires_at = EXCLUDED.expires_at,
-		       sent_at    = now()
+		   SET user_id        = EXCLUDED.user_id,
+		       token          = EXCLUDED.token,
+		       status         = 'invited',
+		       expires_at     = EXCLUDED.expires_at,
+		       sent_at        = now(),
+		       -- Each paid registration gets the paper's full allowance of
+		       -- attempts; earlier sittings no longer count against it.
+		       attempts_since = now()
 		RETURNING id::text
 	`, assessmentID, email, userID, inviteToken, expiresAt).Scan(&inviteID); err != nil {
 		return "", "", fmt.Errorf("write invite: %w", err)
@@ -880,23 +890,47 @@ func (h *CertificationHandler) handleOutcome(w http.ResponseWriter, r *http.Requ
 	}
 
 	ctx := r.Context()
+	// Only the candidate who sat the attempt may read it — reading it is also
+	// what issues the certificate.
+	callerID := middleware.UserIDFromContext(ctx)
+	if callerID == "" {
+		writeErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
 	var regID, status, examTitle, holderName, userID string
 	var passPercent float64
 	var score, maxScore *float64
-	var attemptStatus string
+	var attemptStatus, assessmentID string
+	var maxAttempts, attemptsUsed, attemptNo, resitWait, durationMin int
+	var examSlug string
+	var startedAt, submittedAt *time.Time
 	err := h.Pool.QueryRow(ctx, `
 		SELECT reg.id::text, reg.status, e.title, e.pass_percent, u.name, u.id::text,
-		       at.score, at.max_score, at.status
+		       e.slug, e.resit_wait_days, COALESCE(a.duration_minutes, 0),
+		       at.started_at, COALESCE(at.submitted_at, at.evaluated_at),
+		       at.score, at.max_score, at.status, at.assessment_id::text,
+		       GREATEST(a.max_attempts, 1),
+		       (SELECT count(*) FROM attempts x
+		         WHERE x.assessment_id = at.assessment_id AND x.user_id = at.user_id
+		           AND x.started_at >= COALESCE(i.attempts_since, '-infinity')),
+		       -- This attempt's own number, so an older attempt reads as itself.
+		       (SELECT count(*) FROM attempts x
+		         WHERE x.assessment_id = at.assessment_id AND x.user_id = at.user_id
+		           AND x.started_at >= COALESCE(i.attempts_since, '-infinity')
+		           AND x.started_at <= at.started_at)
 		FROM   attempts at
+		JOIN   assessments a ON a.id = at.assessment_id
+		LEFT   JOIN assessment_invites i ON i.assessment_id = at.assessment_id AND i.user_id = at.user_id
 		JOIN   certification_exams e ON e.assessment_id = at.assessment_id
 		JOIN   certification_registrations reg
 		       ON reg.exam_id = e.id AND reg.user_id = at.user_id
 		JOIN   users u ON u.id = at.user_id
-		WHERE  at.id = $1::uuid
+		WHERE  at.id = $1::uuid AND at.user_id = $2::uuid
 		ORDER  BY reg.created_at DESC
 		LIMIT  1
-	`, attemptID).Scan(&regID, &status, &examTitle, &passPercent, &holderName, &userID,
-		&score, &maxScore, &attemptStatus)
+	`, attemptID, callerID).Scan(&regID, &status, &examTitle, &passPercent, &holderName, &userID,
+		&examSlug, &resitWait, &durationMin, &startedAt, &submittedAt,
+		&score, &maxScore, &attemptStatus, &assessmentID, &maxAttempts, &attemptsUsed, &attemptNo)
 	if errors.Is(err, pgx.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "invalid input syntax")) {
 		// Not a certification attempt — the caller is a scholarship or practice
 		// taker and the result page should fall back to its own rendering.
@@ -924,13 +958,23 @@ func (h *CertificationHandler) handleOutcome(w http.ResponseWriter, r *http.Requ
 	}
 	passed := percent >= passPercent && attemptStatus == "evaluated"
 
+	attemptsLeft := maxAttempts - attemptsUsed
+	if attemptsLeft < 0 || passed {
+		attemptsLeft = 0
+	}
 	newStatus := "failed"
-	if passed {
+	switch {
+	case passed:
 		newStatus = "passed"
+	case attemptsLeft > 0:
+		// Not passed, but the registration still has an attempt: keep it open
+		// so the candidate can sit again on the same link, and so a pass on the
+		// next attempt can still move it to 'passed'.
+		newStatus = "started"
 	}
 	if _, err := h.Pool.Exec(ctx, `
 		UPDATE certification_registrations SET status = $2, updated_at = now()
-		WHERE  id = $1::uuid AND status IN ('paid', 'started', 'submitted')
+		WHERE  id = $1::uuid AND status IN ('paid', 'started', 'submitted') AND status <> $2
 	`, regID, newStatus); err != nil {
 		h.Log.Warn("update registration outcome failed", zap.Error(err))
 	}
@@ -942,6 +986,38 @@ func (h *CertificationHandler) handleOutcome(w http.ResponseWriter, r *http.Requ
 		"passed":          passed,
 		"scorePercent":    roundTo(percent, 2),
 		"passPercent":     passPercent,
+		"attemptNo":       max(attemptNo, 1),
+		"maxAttempts":     maxAttempts,
+		"attemptsLeft":    attemptsLeft,
+		"assessmentId":    assessmentID,
+		"holderName":      holderName,
+		// Ended by the tab-switch limit rather than submitted by the candidate.
+		"endedByProctor":  attemptStatus == "disqualified",
+		"examUrl":         h.siteBase + "/certifications/" + examSlug,
+		"durationMinutes": durationMin,
+	}
+	if score != nil && maxScore != nil {
+		resp["marks"] = roundTo(*score, 2)
+		resp["maxMarks"] = roundTo(*maxScore, 2)
+	}
+	if startedAt != nil && submittedAt != nil && submittedAt.After(*startedAt) {
+		mins := int(math.Ceil(submittedAt.Sub(*startedAt).Minutes()))
+		if durationMin > 0 && mins > durationMin {
+			mins = durationMin
+		}
+		resp["timeTakenMinutes"] = mins
+	}
+	if submittedAt != nil {
+		resp["submittedAt"] = submittedAt.Format(time.RFC3339)
+	}
+	// Out of attempts: say when a new registration opens, matching the
+	// cooling-off check in handleOrder.
+	if !passed && attemptsLeft == 0 && status != "passed" {
+		from := time.Now().UTC()
+		if submittedAt != nil {
+			from = submittedAt.UTC()
+		}
+		resp["resitFrom"] = from.Add(time.Duration(resitWait) * 24 * time.Hour).Format(time.RFC3339)
 	}
 
 	if passed {
@@ -1179,7 +1255,7 @@ Start the exam: %s
 
 You can sit it any time before %s. Before you begin:
 - Allow about the full duration in one sitting — the timer does not pause.
-- Use a laptop or desktop with a working camera, on a stable connection.
+- Use a laptop or desktop on a stable connection, and allow camera access if the exam asks for it.
 - The exam runs in fullscreen and is proctored; switching tabs is recorded.
 
 Pass and your certificate is issued immediately, with a link an employer can verify.

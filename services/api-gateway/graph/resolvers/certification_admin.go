@@ -51,6 +51,9 @@ type certExamAdmin struct {
 	ClosesAt        string  `json:"closes_at,omitempty"`
 	Registrations   int     `json:"registrations"`
 	Passed          int     `json:"passed"`
+	// A random-draw section with no course filter pulls from the whole bank,
+	// so a "Java" exam can serve aptitude or CSS questions. Admin is warned.
+	UnscopedDraw bool `json:"unscoped_draw"`
 }
 
 // ListExams backs GET /api/admin/certification-exams.
@@ -63,7 +66,11 @@ func (h *CertificationHandler) ListExams(w http.ResponseWriter, r *http.Request)
 		       (SELECT count(*) FROM certification_registrations reg
 		         WHERE reg.exam_id = c.id AND reg.status <> 'created'),
 		       (SELECT count(*) FROM certification_registrations reg
-		         WHERE reg.exam_id = c.id AND reg.status = 'passed')
+		         WHERE reg.exam_id = c.id AND reg.status = 'passed'),
+		       EXISTS (SELECT 1 FROM assessment_sections s
+		                WHERE s.assessment_id = c.assessment_id
+		                  AND s.kind = 'mcq' AND COALESCE(s.pick_count, 0) > 0
+		                  AND s.pick_course = '')
 		FROM   certification_exams c
 		LEFT   JOIN assessments a ON a.id = c.assessment_id
 		ORDER  BY c.is_active DESC, c.title
@@ -83,7 +90,7 @@ func (h *CertificationHandler) ListExams(w http.ResponseWriter, r *http.Request)
 		if err := rows.Scan(&e.ID, &e.Slug, &e.Title, &e.CourseID, &e.AssessmentID,
 			&e.AssessmentTitle, &e.AssessmentState, &pricePaise, &e.PassPercent,
 			&e.LinkValidDays, &e.ResitWaitDays, &e.Summary, &e.IsActive, &opens, &closes,
-			&e.Registrations, &e.Passed); err != nil {
+			&e.Registrations, &e.Passed, &e.UnscopedDraw); err != nil {
 			h.Log.Error("scan certification exam failed", zap.Error(err))
 			writeErr(w, http.StatusInternalServerError, "could not load the exams")
 			return
