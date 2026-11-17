@@ -254,6 +254,17 @@ func main() {
 			log.Info("course progress registered at /api/course-progress")
 		}
 
+		// College view: a placement cell sees its own linked students, read
+		// only; students link and unlink themselves. Attendance is computed by
+		// the attendance handler, so it is shared rather than re-implemented.
+		collegeHandler, err := resolvers.NewCollegeHandler(context.Background(), adminPool, log, attendanceHandler)
+		if err != nil {
+			log.Error("college handler init failed — college view disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/college/", collegeHandler)
+			log.Info("college view registered at /api/college/")
+		}
+
 		// The course pages' AI mentor chat. The Gemini key stays on the server.
 		aiMentorHandler := resolvers.NewAIMentorHandler(log)
 		mux.Handle("/api/ai-mentor/", aiMentorHandler)
