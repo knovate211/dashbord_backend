@@ -147,5 +147,15 @@ func (h *CourseProgressHandler) save(w http.ResponseWriter, r *http.Request, use
 		writeErr(w, http.StatusInternalServerError, "could not save progress")
 		return
 	}
-	writeJSON(w, http.StatusOK, saved)
+	// Finishing the syllabus earns the course certificate. A failure here
+	// must not lose the progress that was just saved, so it is only logged.
+	resp := map[string]any{"course_key": saved.CourseKey, "max_index": saved.MaxIndex, "last_lesson": saved.LastLesson}
+	if courseComplete(courseKey, saved.MaxIndex) {
+		if id, err := h.issueCourseCertificate(r.Context(), userID, courseKey); err != nil {
+			h.Log.Error("issue course certificate failed", zap.Error(err), zap.String("course", courseKey))
+		} else if id != "" {
+			resp["certificate_id"] = id
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

@@ -1107,7 +1107,7 @@ func (h *CertificationHandler) handleMine(w http.ResponseWriter, r *http.Request
 		return
 	}
 	rows, err := h.Pool.Query(r.Context(), `
-		SELECT credential_id, title, COALESCE(score_percent, 0), issued_at,
+		SELECT credential_id, holder_name, title, COALESCE(score_percent, 0), issued_at,
 		       revoked_at IS NOT NULL, source
 		FROM   certificates
 		WHERE  user_id = $1::uuid
@@ -1122,6 +1122,7 @@ func (h *CertificationHandler) handleMine(w http.ResponseWriter, r *http.Request
 
 	type item struct {
 		CredentialID string  `json:"credentialId"`
+		HolderName   string  `json:"holderName"`
 		Title        string  `json:"title"`
 		ScorePercent float64 `json:"scorePercent"`
 		IssuedAt     string  `json:"issuedAt"`
@@ -1133,7 +1134,7 @@ func (h *CertificationHandler) handleMine(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var it item
 		var issued time.Time
-		if err := rows.Scan(&it.CredentialID, &it.Title, &it.ScorePercent, &issued, &it.Revoked, &it.Source); err != nil {
+		if err := rows.Scan(&it.CredentialID, &it.HolderName, &it.Title, &it.ScorePercent, &issued, &it.Revoked, &it.Source); err != nil {
 			h.Log.Error("scan certificate failed", zap.Error(err))
 			writeErr(w, http.StatusInternalServerError, "could not load your certificates")
 			return
