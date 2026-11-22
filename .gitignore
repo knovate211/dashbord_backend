@@ -13,3 +13,4 @@ reference-solutions.json
 # Python bytecode from scripts/
 __pycache__/
 *.pyc
+*.dump

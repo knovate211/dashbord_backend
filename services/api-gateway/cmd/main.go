@@ -254,6 +254,15 @@ func main() {
 			log.Info("course progress registered at /api/course-progress")
 		}
 
+		// Profile photo and resume, kept per user.
+		userFilesHandler, err := resolvers.NewUserFilesHandler(context.Background(), adminPool, log)
+		if err != nil {
+			log.Error("user files handler init failed — uploads disabled", zap.Error(err))
+		} else {
+			mux.Handle("/api/files/", userFilesHandler)
+			log.Info("user files registered at /api/files/")
+		}
+
 		// College view: a placement cell sees its own linked students, read
 		// only; students link and unlink themselves. Attendance is computed by
 		// the attendance handler, so it is shared rather than re-implemented.
