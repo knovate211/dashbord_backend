@@ -39,11 +39,11 @@ func (h *RecruiterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	role := middleware.RoleFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	if role != "recruiter" && role != "admin" {
-		h.fail(w, http.StatusForbidden, "recruiter access required")
+		writeErr(w, http.StatusForbidden, "recruiter access required")
 		return
 	}
 
@@ -120,7 +120,7 @@ func (h *RecruiterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.guardShortlist(w, r, role, userID, seg[1], func() { h.setDecision(w, r, seg[1], seg[3], userID) })
 
 	default:
-		h.fail(w, http.StatusNotFound, "unknown recruiter endpoint")
+		writeErr(w, http.StatusNotFound, "unknown recruiter endpoint")
 	}
 }
 
@@ -137,7 +137,7 @@ func (h *RecruiterHandler) guard(w http.ResponseWriter, r *http.Request, role, u
 		return
 	}
 	if !resp.Allowed {
-		h.fail(w, http.StatusForbidden, resp.Reason)
+		writeErr(w, http.StatusForbidden, resp.Reason)
 		return
 	}
 	next()
@@ -165,7 +165,7 @@ func (h *RecruiterHandler) guardShortlist(w http.ResponseWriter, r *http.Request
 
 func (h *RecruiterHandler) adminOnly(w http.ResponseWriter, r *http.Request, role string, next func(http.ResponseWriter, *http.Request)) {
 	if role != "admin" {
-		h.fail(w, http.StatusForbidden, "admin access required")
+		writeErr(w, http.StatusForbidden, "admin access required")
 		return
 	}
 	next(w, r)
@@ -196,7 +196,7 @@ func (h *RecruiterHandler) listCompanyMembers(w http.ResponseWriter, r *http.Req
 		UserId: userID, Role: role, CompanyId: companyID,
 	})
 	if err != nil || !auth.Allowed {
-		h.fail(w, http.StatusForbidden, "not a member of this company")
+		writeErr(w, http.StatusForbidden, "not a member of this company")
 		return
 	}
 	resp, err := h.AssessmentSvc.ListCompanyMembers(r.Context(), &assessmentv1.ListCompanyMembersRequest{CompanyId: companyID})
@@ -228,7 +228,7 @@ func (h *RecruiterHandler) recruiterCompany(w http.ResponseWriter, r *http.Reque
 			UserId: userID, Role: role, CompanyId: requested,
 		})
 		if err != nil || !auth.Allowed {
-			h.fail(w, http.StatusForbidden, "not a member of this company")
+			writeErr(w, http.StatusForbidden, "not a member of this company")
 			return "", false
 		}
 		return requested, true
@@ -240,12 +240,12 @@ func (h *RecruiterHandler) recruiterCompany(w http.ResponseWriter, r *http.Reque
 	}
 	switch len(companies.Companies) {
 	case 0:
-		h.fail(w, http.StatusForbidden, "your account is not linked to a company yet")
+		writeErr(w, http.StatusForbidden, "your account is not linked to a company yet")
 		return "", false
 	case 1:
 		return companies.Companies[0].Id, true
 	default:
-		h.fail(w, http.StatusBadRequest, "choose which company to work in")
+		writeErr(w, http.StatusBadRequest, "choose which company to work in")
 		return "", false
 	}
 }
@@ -338,7 +338,7 @@ func (h *RecruiterHandler) listAssessments(w http.ResponseWriter, r *http.Reques
 				UserId: userID, Role: role, CompanyId: companyID,
 			})
 			if err != nil || !auth.Allowed {
-				h.fail(w, http.StatusForbidden, "not a member of this company")
+				writeErr(w, http.StatusForbidden, "not a member of this company")
 				return
 			}
 		} else {
@@ -396,11 +396,11 @@ func (h *RecruiterHandler) createAssessment(w http.ResponseWriter, r *http.Reque
 			UserId: userID, Role: role, CompanyId: a.CompanyId,
 		})
 		if err != nil || !auth.Allowed {
-			h.fail(w, http.StatusForbidden, "not a member of this company")
+			writeErr(w, http.StatusForbidden, "not a member of this company")
 			return
 		}
 	} else if role != "admin" {
-		h.fail(w, http.StatusForbidden, "a recruiter must create tests under a company")
+		writeErr(w, http.StatusForbidden, "a recruiter must create tests under a company")
 		return
 	}
 	// A recruiter's test is always an invite-only hiring test. A "practice"
@@ -591,7 +591,7 @@ func (h *RecruiterHandler) setDecision(w http.ResponseWriter, r *http.Request, s
 
 func (h *RecruiterHandler) decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return false
 	}
 	return true
@@ -610,7 +610,7 @@ func (h *RecruiterHandler) respond(w http.ResponseWriter, payload any, err error
 func (h *RecruiterHandler) grpcFail(w http.ResponseWriter, err error, fallback string) {
 	st, ok := status.FromError(err)
 	if !ok {
-		h.fail(w, http.StatusInternalServerError, fallback)
+		writeErr(w, http.StatusInternalServerError, fallback)
 		return
 	}
 	code := http.StatusInternalServerError
@@ -627,15 +627,7 @@ func (h *RecruiterHandler) grpcFail(w http.ResponseWriter, err error, fallback s
 	if code == http.StatusInternalServerError {
 		h.Log.Error("recruiter request failed", zap.Error(err))
 	}
-	h.fail(w, code, st.Message())
-}
-
-func (h *RecruiterHandler) fail(w http.ResponseWriter, code int, msg string) {
-	if msg == "" {
-		msg = http.StatusText(code)
-	}
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	writeErr(w, code, st.Message())
 }
 
 func intQuery(v string, fallback int32) int32 {

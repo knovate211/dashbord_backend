@@ -51,6 +51,9 @@ type certExamAdmin struct {
 	ClosesAt        string  `json:"closes_at,omitempty"`
 	Registrations   int     `json:"registrations"`
 	Passed          int     `json:"passed"`
+	// A random-draw section with no course filter pulls from the whole bank,
+	// so a "Java" exam can serve aptitude or CSS questions. Admin is warned.
+	UnscopedDraw bool `json:"unscoped_draw"`
 }
 
 // ListExams backs GET /api/admin/certification-exams.
@@ -63,14 +66,18 @@ func (h *CertificationHandler) ListExams(w http.ResponseWriter, r *http.Request)
 		       (SELECT count(*) FROM certification_registrations reg
 		         WHERE reg.exam_id = c.id AND reg.status <> 'created'),
 		       (SELECT count(*) FROM certification_registrations reg
-		         WHERE reg.exam_id = c.id AND reg.status = 'passed')
+		         WHERE reg.exam_id = c.id AND reg.status = 'passed'),
+		       EXISTS (SELECT 1 FROM assessment_sections s
+		                WHERE s.assessment_id = c.assessment_id
+		                  AND s.kind = 'mcq' AND COALESCE(s.pick_count, 0) > 0
+		                  AND s.pick_course = '')
 		FROM   certification_exams c
 		LEFT   JOIN assessments a ON a.id = c.assessment_id
 		ORDER  BY c.is_active DESC, c.title
 	`)
 	if err != nil {
 		h.Log.Error("list certification exams failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the exams")
+		writeErr(w, http.StatusInternalServerError, "could not load the exams")
 		return
 	}
 	defer rows.Close()
@@ -83,9 +90,9 @@ func (h *CertificationHandler) ListExams(w http.ResponseWriter, r *http.Request)
 		if err := rows.Scan(&e.ID, &e.Slug, &e.Title, &e.CourseID, &e.AssessmentID,
 			&e.AssessmentTitle, &e.AssessmentState, &pricePaise, &e.PassPercent,
 			&e.LinkValidDays, &e.ResitWaitDays, &e.Summary, &e.IsActive, &opens, &closes,
-			&e.Registrations, &e.Passed); err != nil {
+			&e.Registrations, &e.Passed, &e.UnscopedDraw); err != nil {
 			h.Log.Error("scan certification exam failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load the exams")
+			writeErr(w, http.StatusInternalServerError, "could not load the exams")
 			return
 		}
 		e.PriceRupees = pricePaise / 100
@@ -97,7 +104,7 @@ func (h *CertificationHandler) ListExams(w http.ResponseWriter, r *http.Request)
 		}
 		out = append(out, e)
 	}
-	h.write(w, http.StatusOK, map[string]any{"exams": out})
+	writeJSON(w, http.StatusOK, map[string]any{"exams": out})
 }
 
 // UpsertExam backs POST /api/admin/certification-exams, keyed on slug.
@@ -117,34 +124,34 @@ func (h *CertificationHandler) UpsertExam(w http.ResponseWriter, r *http.Request
 		ClosesAt      string  `json:"closes_at"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	slug := strings.ToLower(clip(strings.TrimSpace(req.Slug), 80))
 	title := clip(strings.TrimSpace(req.Title), 160)
 	if slug == "" || title == "" {
-		h.fail(w, http.StatusBadRequest, "slug and title are required")
+		writeErr(w, http.StatusBadRequest, "slug and title are required")
 		return
 	}
 	if !slugRe.MatchString(slug) {
-		h.fail(w, http.StatusBadRequest, "the slug may contain only lowercase letters, numbers and hyphens")
+		writeErr(w, http.StatusBadRequest, "the slug may contain only lowercase letters, numbers and hyphens")
 		return
 	}
 	if req.AssessmentID == "" {
-		h.fail(w, http.StatusBadRequest, "choose the paper candidates will sit")
+		writeErr(w, http.StatusBadRequest, "choose the paper candidates will sit")
 		return
 	}
 	if req.PriceRupees < 0 {
-		h.fail(w, http.StatusBadRequest, "the price cannot be negative")
+		writeErr(w, http.StatusBadRequest, "the price cannot be negative")
 		return
 	}
 	if req.PassPercent < 0 || req.PassPercent > 100 {
-		h.fail(w, http.StatusBadRequest, "the pass mark must be between 0 and 100")
+		writeErr(w, http.StatusBadRequest, "the pass mark must be between 0 and 100")
 		return
 	}
 	if req.LinkValidDays < 1 || req.LinkValidDays > 365 {
-		h.fail(w, http.StatusBadRequest, "the link must be valid for between 1 and 365 days")
+		writeErr(w, http.StatusBadRequest, "the link must be valid for between 1 and 365 days")
 		return
 	}
 
@@ -155,16 +162,16 @@ func (h *CertificationHandler) UpsertExam(w http.ResponseWriter, r *http.Request
 	err := h.Pool.QueryRow(r.Context(), `SELECT purpose, status FROM assessments WHERE id = $1::uuid`,
 		req.AssessmentID).Scan(&purpose, &paperStatus)
 	if errors.Is(err, pgx.ErrNoRows) || (err != nil && strings.Contains(err.Error(), "invalid input syntax")) {
-		h.fail(w, http.StatusBadRequest, "that paper no longer exists")
+		writeErr(w, http.StatusBadRequest, "that paper no longer exists")
 		return
 	}
 	if err != nil {
 		h.Log.Error("look up paper failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not save the exam")
+		writeErr(w, http.StatusInternalServerError, "could not save the exam")
 		return
 	}
 	if !strings.EqualFold(purpose, "certification") {
-		h.fail(w, http.StatusBadRequest,
+		writeErr(w, http.StatusBadRequest,
 			"that paper's type is '"+purpose+"' — a certification exam needs a paper of type 'certification' so it stays invite-only")
 		return
 	}
@@ -173,7 +180,7 @@ func (h *CertificationHandler) UpsertExam(w http.ResponseWriter, r *http.Request
 	// field in the admin form clears the dates rather than failing the save.
 	opens, closes := parseOptionalTime(req.OpensAt), parseOptionalTime(req.ClosesAt)
 	if opens != nil && closes != nil && closes.Before(*opens) {
-		h.fail(w, http.StatusBadRequest, "the window closes before it opens")
+		writeErr(w, http.StatusBadRequest, "the window closes before it opens")
 		return
 	}
 
@@ -204,18 +211,18 @@ func (h *CertificationHandler) UpsertExam(w http.ResponseWriter, r *http.Request
 		req.PriceRupees*100, req.PassPercent, req.LinkValidDays, resit,
 		clip(strings.TrimSpace(req.Summary), 2000), active, opens, closes).Scan(&id); err != nil {
 		h.Log.Error("upsert certification exam failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not save the exam")
+		writeErr(w, http.StatusInternalServerError, "could not save the exam")
 		return
 	}
 
 	if paperStatus != "published" {
-		h.write(w, http.StatusOK, map[string]any{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"success": true, "id": id,
 			"warning": "saved, but the paper is still a draft — the exam stays off sale until it is published",
 		})
 		return
 	}
-	h.write(w, http.StatusOK, map[string]any{"success": true, "id": id})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id})
 }
 
 // DeleteExam backs DELETE /api/admin/certification-exams/{id}. Refused once
@@ -224,25 +231,25 @@ func (h *CertificationHandler) DeleteExam(w http.ResponseWriter, r *http.Request
 	var used int
 	if err := h.Pool.QueryRow(r.Context(),
 		`SELECT count(*) FROM certification_registrations WHERE exam_id = $1::uuid`, id).Scan(&used); err != nil {
-		h.fail(w, http.StatusBadRequest, "unknown exam")
+		writeErr(w, http.StatusBadRequest, "unknown exam")
 		return
 	}
 	if used > 0 {
-		h.fail(w, http.StatusConflict,
+		writeErr(w, http.StatusConflict,
 			fmt.Sprintf("%d people have registered for this exam — pause it instead of deleting it", used))
 		return
 	}
 	tag, err := h.Pool.Exec(r.Context(), `DELETE FROM certification_exams WHERE id = $1::uuid`, id)
 	if err != nil {
 		h.Log.Error("delete certification exam failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not delete the exam")
+		writeErr(w, http.StatusInternalServerError, "could not delete the exam")
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		h.fail(w, http.StatusNotFound, "exam not found")
+		writeErr(w, http.StatusNotFound, "exam not found")
 		return
 	}
-	h.write(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // ─── Registrations ────────────────────────────────────────────────────────────
@@ -345,7 +352,7 @@ func (h *CertificationHandler) ListRegistrations(w http.ResponseWriter, r *http.
 		SELECT count(*) FROM certification_registrations reg
 		JOIN   certification_exams e ON e.id = reg.exam_id `+where, args...).Scan(&total); err != nil {
 		h.Log.Error("count certification registrations failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load registrations")
+		writeErr(w, http.StatusInternalServerError, "could not load registrations")
 		return
 	}
 
@@ -355,7 +362,7 @@ func (h *CertificationHandler) ListRegistrations(w http.ResponseWriter, r *http.
 		append(args, size, (page-1)*size)...)
 	if err != nil {
 		h.Log.Error("list certification registrations failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load registrations")
+		writeErr(w, http.StatusInternalServerError, "could not load registrations")
 		return
 	}
 	defer rows.Close()
@@ -363,10 +370,10 @@ func (h *CertificationHandler) ListRegistrations(w http.ResponseWriter, r *http.
 	out, err := h.scanRegistrations(rows)
 	if err != nil {
 		h.Log.Error("scan certification registrations failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load registrations")
+		writeErr(w, http.StatusInternalServerError, "could not load registrations")
 		return
 	}
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"registrations": out, "total": total, "page": page, "pageSize": size,
 	})
 }
@@ -405,14 +412,14 @@ func (h *CertificationHandler) ExportRegistrations(w http.ResponseWriter, r *htt
 	rows, err := h.Pool.Query(r.Context(), certRegistrationQuery+" "+where+" ORDER BY reg.created_at DESC", args...)
 	if err != nil {
 		h.Log.Error("export certification registrations failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not export registrations")
+		writeErr(w, http.StatusInternalServerError, "could not export registrations")
 		return
 	}
 	defer rows.Close()
 	list, err := h.scanRegistrations(rows)
 	if err != nil {
 		h.Log.Error("scan certification export failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not export registrations")
+		writeErr(w, http.StatusInternalServerError, "could not export registrations")
 		return
 	}
 
@@ -448,7 +455,7 @@ func (h *CertificationHandler) UpdateRegistration(w http.ResponseWriter, r *http
 		Reason string  `json:"reason"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	ctx := r.Context()
@@ -458,7 +465,7 @@ func (h *CertificationHandler) UpdateRegistration(w http.ResponseWriter, r *http
 			UPDATE certification_registrations SET notes = $2, updated_at = now() WHERE id = $1::uuid`,
 			id, clip(*req.Notes, 2000)); err != nil {
 			h.Log.Error("update certification notes failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not save your note")
+			writeErr(w, http.StatusInternalServerError, "could not save your note")
 			return
 		}
 	}
@@ -477,11 +484,11 @@ func (h *CertificationHandler) UpdateRegistration(w http.ResponseWriter, r *http
 			 WHERE id = $1::uuid AND status IN ('paid', 'created', 'expired')`, id)
 		if err != nil {
 			h.Log.Error("mark refunded failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not record the refund")
+			writeErr(w, http.StatusInternalServerError, "could not record the refund")
 			return
 		}
 		if tag.RowsAffected() == 0 {
-			h.fail(w, http.StatusConflict, "only a registration that has not been sat can be refunded here")
+			writeErr(w, http.StatusConflict, "only a registration that has not been sat can be refunded here")
 			return
 		}
 		_, _ = h.Pool.Exec(ctx, `
@@ -511,24 +518,24 @@ func (h *CertificationHandler) UpdateRegistration(w http.ResponseWriter, r *http
 			         ORDER  BY a.started_at DESC LIMIT 1) at ON true
 			WHERE  reg.id = $1::uuid`, id).Scan(&regID, &userID, &holder, &title, &attemptID, &percent)
 		if err != nil {
-			h.fail(w, http.StatusNotFound, "registration not found")
+			writeErr(w, http.StatusNotFound, "registration not found")
 			return
 		}
 		cert, err := h.issueCertificate(ctx, regID, userID, holder, title, attemptID, percent)
 		if err != nil {
 			h.Log.Error("manual certificate issue failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not issue the certificate")
+			writeErr(w, http.StatusInternalServerError, "could not issue the certificate")
 			return
 		}
 		_, _ = h.Pool.Exec(ctx, `
 			UPDATE certification_registrations SET status = 'passed', updated_at = now() WHERE id = $1::uuid`, id)
-		h.write(w, http.StatusOK, map[string]any{"success": true, "credential_id": cert.CredentialID})
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "credential_id": cert.CredentialID})
 		return
 
 	case "revoke_certificate":
 		reason := clip(strings.TrimSpace(req.Reason), 500)
 		if reason == "" {
-			h.fail(w, http.StatusBadRequest, "give a reason — it is shown on the public verification page")
+			writeErr(w, http.StatusBadRequest, "give a reason — it is shown on the public verification page")
 			return
 		}
 		tag, err := h.Pool.Exec(ctx, `
@@ -536,20 +543,20 @@ func (h *CertificationHandler) UpdateRegistration(w http.ResponseWriter, r *http
 			WHERE  registration_id = $1::uuid AND revoked_at IS NULL`, id, reason)
 		if err != nil {
 			h.Log.Error("revoke certificate failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not revoke the certificate")
+			writeErr(w, http.StatusInternalServerError, "could not revoke the certificate")
 			return
 		}
 		if tag.RowsAffected() == 0 {
-			h.fail(w, http.StatusConflict, "there is no active certificate for this registration")
+			writeErr(w, http.StatusConflict, "there is no active certificate for this registration")
 			return
 		}
 
 	default:
-		h.fail(w, http.StatusBadRequest, "unknown action")
+		writeErr(w, http.StatusBadRequest, "unknown action")
 		return
 	}
 
-	h.write(w, http.StatusOK, map[string]any{"success": true})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 // ResendLink backs POST /api/admin/certifications/{id}/resend. It rotates the
@@ -565,21 +572,21 @@ func (h *CertificationHandler) ResendLink(w http.ResponseWriter, r *http.Request
 		JOIN   certification_exams e ON e.id = reg.exam_id
 		WHERE  reg.id = $1::uuid`, id).Scan(&name, &email, &examTitle, &status, &expires, &linkValidDays)
 	if err != nil {
-		h.fail(w, http.StatusNotFound, "registration not found")
+		writeErr(w, http.StatusNotFound, "registration not found")
 		return
 	}
 	if status == "created" {
-		h.fail(w, http.StatusConflict, "this registration has not been paid for")
+		writeErr(w, http.StatusConflict, "this registration has not been paid for")
 		return
 	}
 	if certTerminal[status] && status != "expired" {
-		h.fail(w, http.StatusConflict, "this exam has already been sat")
+		writeErr(w, http.StatusConflict, "this exam has already been sat")
 		return
 	}
 
 	raw, err := randomToken(32)
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not issue a new link")
+		writeErr(w, http.StatusInternalServerError, "could not issue a new link")
 		return
 	}
 	newExpiry := time.Now().UTC().Add(time.Duration(linkValidDays) * 24 * time.Hour)
@@ -588,7 +595,7 @@ func (h *CertificationHandler) ResendLink(w http.ResponseWriter, r *http.Request
 		   SET claim_token_hash = $2, claim_expires_at = $3, status = 'paid', updated_at = now()
 		 WHERE id = $1::uuid`, id, sha256Hex(raw), newExpiry); err != nil {
 		h.Log.Error("rotate certification claim token failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not issue a new link")
+		writeErr(w, http.StatusInternalServerError, "could not issue a new link")
 		return
 	}
 	// The invite has its own expiry; move it too, or the engine refuses the
@@ -614,7 +621,7 @@ func (h *CertificationHandler) ResendLink(w http.ResponseWriter, r *http.Request
 
 	// The URL is returned to staff, as the scholarship resend does: a counsellor
 	// on the phone to a candidate with a broken mailbox needs to read it out.
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"success": emailed, "email": email, "url": examURL,
 		"expires_at": newExpiry.Format(time.RFC3339),
 	})
@@ -640,16 +647,16 @@ func (h *CertificationHandler) ExtendLink(w http.ResponseWriter, r *http.Request
 		   AND status IN ('paid', 'started', 'expired')`, id, until)
 	if err != nil {
 		h.Log.Error("extend certification link failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not extend the link")
+		writeErr(w, http.StatusInternalServerError, "could not extend the link")
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		h.fail(w, http.StatusConflict, "this registration has no live link to extend — resend it instead")
+		writeErr(w, http.StatusConflict, "this registration has no live link to extend — resend it instead")
 		return
 	}
 	_, _ = h.Pool.Exec(r.Context(), `
 		UPDATE assessment_invites SET expires_at = $2, status = 'invited'
 		WHERE  id = (SELECT invite_id FROM certification_registrations WHERE id = $1::uuid)`, id, until)
 
-	h.write(w, http.StatusOK, map[string]any{"success": true, "expires_at": until.Format(time.RFC3339)})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "expires_at": until.Format(time.RFC3339)})
 }

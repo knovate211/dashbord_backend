@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/graphql-go/graphql"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"github.com/knovate211/api-gateway/middleware"
@@ -14,6 +15,9 @@ import (
 type UserClients struct {
 	UserSvc userv1.UserServiceClient
 	Log     *zap.Logger
+	// Pool, when set, answers getMyCourses with one query instead of one
+	// user-service call per programme.
+	Pool *pgxpool.Pool
 }
 
 // GetProfile handles the getProfile GraphQL query.
@@ -184,6 +188,16 @@ func (c *UserClients) UpsertProfile(p graphql.ResolveParams) (interface{}, error
 	}, nil
 }
 
+// programOrder is the order getMyCourses lists programmes in. Every key of
+// programModules must appear here.
+var programOrder = []string{"1", "2", "3", "4", "5", "genai", "seo", "digital-marketing", "testing"}
+
+// programIncludes lists the programmes a bundle grants. Full Stack is an
+// entitlement rather than a course of its own: the curriculum is these four.
+var programIncludes = map[string][]string{
+	"5": {"1", "2", "3", "genai"},
+}
+
 var programModules = map[string][]map[string]interface{}{
 	"1": { // Java Dev
 		{
@@ -286,23 +300,80 @@ func (c *UserClients) GetMyCourses(p graphql.ResolveParams) (interface{}, error)
 		return nil, fmt.Errorf("authentication required")
 	}
 
-	var myCourses []map[string]interface{}
+	granted, err := c.grantedPrograms(p, userID)
+	if err != nil {
+		return nil, err
+	}
 
-	for programID, modules := range programModules {
+	return coursesFor(granted), nil
+}
+
+// coursesFor lists the course records for the programmes a learner holds, in
+// programOrder (not map order) so the list is stable between requests.
+//
+// A programme that bundles others (Full Stack) contributes the bundled courses
+// first, in its own position, then its own record — the course page uses that
+// record to open /courses/fullstack. A course reachable twice (bought directly
+// and through Full Stack) is listed once.
+func coursesFor(granted map[string]bool) []map[string]interface{} {
+	var out []map[string]interface{}
+	listed := map[string]bool{}
+	add := func(programID string) {
+		if listed[programID] {
+			return
+		}
+		listed[programID] = true
+		out = append(out, programModules[programID]...)
+	}
+	for _, programID := range programOrder {
+		if !granted[programID] {
+			continue
+		}
+		for _, included := range programIncludes[programID] {
+			add(included)
+		}
+		add(programID)
+	}
+	return out
+}
+
+// grantedPrograms returns which programmes the user holds. With a pool it is
+// one query; without one it falls back to asking user-service per programme,
+// which is what this used to do on every dashboard load (nine sequential calls).
+func (c *UserClients) grantedPrograms(p graphql.ResolveParams, userID string) (map[string]bool, error) {
+	granted := map[string]bool{}
+	if c.Pool != nil {
+		rows, err := c.Pool.Query(p.Context, `SELECT course_id FROM user_courses WHERE user_id = $1`, userID)
+		if err != nil {
+			c.Log.Error("list user courses failed", zap.Error(err))
+			return nil, fmt.Errorf("could not load your courses")
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, fmt.Errorf("could not load your courses")
+			}
+			granted[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("could not load your courses")
+		}
+		return granted, nil
+	}
+
+	for _, programID := range programOrder {
 		resp, err := c.UserSvc.CheckUserCourseAccess(p.Context, &userv1.CheckUserCourseAccessRequest{
 			UserID:   userID,
-			CourseID: programID, // "1" for Fullstack, "2" for Digital Marketing
+			CourseID: programID,
 		})
 		if err != nil {
 			c.Log.Error("check course access failed", zap.Error(err), zap.String("programId", programID))
 			continue
 		}
-		if resp.HasAccess {
-			myCourses = append(myCourses, modules...)
+		granted[programID] = resp.HasAccess
 		}
-	}
-
-	return myCourses, nil
+	return granted, nil
 }
 
 // SubmitQuiz handles the submitQuiz GraphQL mutation.

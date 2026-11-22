@@ -90,11 +90,19 @@ func (h *IntegrityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	role := middleware.RoleFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/integrity"), "/")
 	seg := strings.Split(path, "/")
+
+	// The review routes carry an id in seg[1]. Checking it here lets the
+	// queries compare uuid columns directly (and use their indexes) without a
+	// malformed id turning into a database error instead of a 404.
+	if len(seg) == 2 && (seg[0] == "assessments" || seg[0] == "attempts") && !ids.IsUUID(seg[1]) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 
 	switch {
 	case path == "heartbeat" && r.Method == http.MethodPost:
@@ -108,14 +116,14 @@ func (h *IntegrityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rep, err := h.buildReport(r.Context(), seg[1])
 		if err != nil {
 			h.Log.Error("integrity report failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not build the integrity report")
+			writeErr(w, http.StatusInternalServerError, "could not build the integrity report")
 			return
 		}
-		h.json(w, http.StatusOK, rep)
+		writeJSON(w, http.StatusOK, rep)
 	case len(seg) == 2 && seg[0] == "attempts" && r.Method == http.MethodGet:
 		h.attemptDetail(w, r, role, userID, seg[1])
 	default:
-		h.fail(w, http.StatusNotFound, "unknown integrity endpoint")
+		writeErr(w, http.StatusNotFound, "unknown integrity endpoint")
 	}
 }
 
@@ -154,12 +162,12 @@ func (h *IntegrityHandler) heartbeat(w http.ResponseWriter, r *http.Request, use
 		Screen    string `json:"screen"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil || body.AttemptID == "" || body.SessionID == "" {
-		h.fail(w, http.StatusBadRequest, "attemptId and sessionId are required")
+		writeErr(w, http.StatusBadRequest, "attemptId and sessionId are required")
 		return
 	}
 	ctx := r.Context()
 	if err := h.liveAttempt(ctx, body.AttemptID, userID); err != nil {
-		h.fail(w, http.StatusNotFound, err.Error())
+		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
 	ip := clientIP(r)
@@ -174,7 +182,7 @@ func (h *IntegrityHandler) heartbeat(w http.ResponseWriter, r *http.Request, use
 		RETURNING (xmax = 0)
 	`, body.AttemptID, session, ip, clip(r.UserAgent(), 300), clip(body.Screen, 60)).Scan(&isNew); err != nil {
 		h.Log.Error("record attempt session failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not record session")
+		writeErr(w, http.StatusInternalServerError, "could not record session")
 		return
 	}
 
@@ -193,7 +201,7 @@ func (h *IntegrityHandler) heartbeat(w http.ResponseWriter, r *http.Request, use
 			h.event(ctx, body.AttemptID, userID, "ip_change", "network changed to "+ip)
 		}
 	}
-	h.json(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (h *IntegrityHandler) event(ctx context.Context, attemptID, userID, kind, detail string) {
@@ -230,22 +238,22 @@ func (h *IntegrityHandler) snapshots(w http.ResponseWriter, r *http.Request, use
 		Snapshots  []snapshotIn `json:"snapshots"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&body); err != nil || body.AttemptID == "" || body.QuestionID == "" {
-		h.fail(w, http.StatusBadRequest, "attemptId, questionId and snapshots are required")
+		writeErr(w, http.StatusBadRequest, "attemptId, questionId and snapshots are required")
 		return
 	}
 	ctx := r.Context()
 	if err := h.liveAttempt(ctx, body.AttemptID, userID); err != nil {
-		h.fail(w, http.StatusNotFound, err.Error())
+		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
 	var kind string
 	if !ids.IsUUID(body.QuestionID) {
-		h.fail(w, http.StatusNotFound, "question not found")
+		writeErr(w, http.StatusNotFound, "question not found")
 		return
 	}
 	if err := h.Pool.QueryRow(ctx, `SELECT kind FROM attempt_questions WHERE id = $1 AND attempt_id = $2`,
 		body.QuestionID, body.AttemptID).Scan(&kind); err != nil || kind != "coding" {
-		h.fail(w, http.StatusNotFound, "question not found")
+		writeErr(w, http.StatusNotFound, "question not found")
 		return
 	}
 	if len(body.Snapshots) > maxSnapshotsPerCall {
@@ -259,7 +267,7 @@ func (h *IntegrityHandler) snapshots(w http.ResponseWriter, r *http.Request, use
 		       (SELECT COUNT(*) FROM code_snapshots WHERE attempt_id = $1 AND question_id = $2)
 	`, body.AttemptID, body.QuestionID).Scan(&prev, &stored)
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not store snapshots")
+		writeErr(w, http.StatusInternalServerError, "could not store snapshots")
 		return
 	}
 
@@ -295,11 +303,11 @@ func (h *IntegrityHandler) snapshots(w http.ResponseWriter, r *http.Request, use
 	if batch.Len() > 0 {
 		if err := h.Pool.SendBatch(ctx, batch).Close(); err != nil {
 			h.Log.Error("store code snapshots failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not store snapshots")
+			writeErr(w, http.StatusInternalServerError, "could not store snapshots")
 			return
 		}
 	}
-	h.json(w, http.StatusOK, map[string]any{"stored": batch.Len()})
+	writeJSON(w, http.StatusOK, map[string]any{"stored": batch.Len()})
 }
 
 // insertedChars is the size of the edit between two versions: what is left
@@ -334,7 +342,7 @@ func trapToken(attemptID, questionID string) string {
 // mayReview allows admins any test, and recruiters their own company's.
 func (h *IntegrityHandler) mayReview(w http.ResponseWriter, ctx context.Context, role, userID, assessmentID string) bool {
 	if role != "admin" && role != "recruiter" {
-		h.fail(w, http.StatusForbidden, "reviewer access required")
+		writeErr(w, http.StatusForbidden, "reviewer access required")
 		return false
 	}
 	var allowed bool
@@ -342,18 +350,18 @@ func (h *IntegrityHandler) mayReview(w http.ResponseWriter, ctx context.Context,
 		SELECT $2 = 'admin' OR EXISTS (
 		         SELECT 1 FROM company_members m
 		         WHERE  m.company_id = a.company_id AND m.user_id::text = $3)
-		FROM   assessments a WHERE a.id::text = $1
+		FROM   assessments a WHERE a.id = $1
 	`, assessmentID, role, userID).Scan(&allowed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "test not found")
+		writeErr(w, http.StatusNotFound, "test not found")
 		return false
 	}
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not check access")
+		writeErr(w, http.StatusInternalServerError, "could not check access")
 		return false
 	}
 	if !allowed {
-		h.fail(w, http.StatusForbidden, "not a member of this company")
+		writeErr(w, http.StatusForbidden, "not a member of this company")
 		return false
 	}
 	return true
@@ -431,7 +439,7 @@ func (h *IntegrityHandler) buildReport(ctx context.Context, assessmentID string)
 	rows, err := h.Pool.Query(ctx, `
 		SELECT a.id::text, COALESCE(u.name, ''), COALESCE(u.email, ''), a.status, a.integrity_score::float8
 		FROM   attempts a LEFT JOIN users u ON u.id = a.user_id
-		WHERE  a.assessment_id::text = $1
+		WHERE  a.assessment_id = $1
 		ORDER  BY a.started_at
 	`, assessmentID)
 	if err != nil {
@@ -462,7 +470,7 @@ func (h *IntegrityHandler) buildReport(ctx context.Context, assessmentID string)
 	// Browser-proctor tallies and the integrity score.
 	evRows, err := h.Pool.Query(ctx, `
 		SELECT attempt_id::text, kind, COUNT(*) FROM proctor_events
-		WHERE  attempt_id::text = ANY($1) GROUP BY attempt_id, kind
+		WHERE  attempt_id = ANY($1) GROUP BY attempt_id, kind
 	`, ids)
 	if err == nil {
 		labels := map[string]string{
@@ -510,7 +518,7 @@ func (h *IntegrityHandler) buildReport(ctx context.Context, assessmentID string)
 	// Sessions and IPs.
 	sRows, err := h.Pool.Query(ctx, `
 		SELECT attempt_id::text, ip, COUNT(*) OVER (PARTITION BY attempt_id)
-		FROM   attempt_sessions WHERE attempt_id::text = ANY($1)
+		FROM   attempt_sessions WHERE attempt_id = ANY($1)
 	`, ids)
 	ipPeople := map[string]map[string]bool{}
 	if err == nil {
@@ -600,7 +608,7 @@ func (h *IntegrityHandler) codeSignals(ctx context.Context, rep *integrityReport
 		       COALESCE(aq.awarded_marks, 0)::float8, COALESCE(aq.time_spent_ms, 0)
 		FROM   attempt_questions aq
 		LEFT   JOIN problems p ON p.id = aq.problem_id
-		WHERE  aq.attempt_id::text = ANY($1) AND aq.kind = 'coding'
+		WHERE  aq.attempt_id = ANY($1) AND aq.kind = 'coding'
 	`, ids)
 	if err != nil {
 		return fmt.Errorf("load coding answers: %w", err)
@@ -627,7 +635,7 @@ func (h *IntegrityHandler) codeSignals(ctx context.Context, rep *integrityReport
 		}
 		sRows, err := h.Pool.Query(ctx, `
 			SELECT problem_id::text, COALESCE(javascript, ''), COALESCE(python, ''), COALESCE(java, ''), COALESCE(cpp, ''), COALESCE(go, '')
-			FROM   starter_codes WHERE problem_id::text = ANY($1)
+			FROM   starter_codes WHERE problem_id = ANY($1)
 		`, pids)
 		if err == nil {
 			for sRows.Next() {
@@ -649,7 +657,7 @@ func (h *IntegrityHandler) codeSignals(ctx context.Context, rep *integrityReport
 		WITH s AS (
 		  SELECT attempt_id, question_id, reason, chars_added,
 		         EXTRACT(EPOCH FROM at - lag(at) OVER (PARTITION BY attempt_id, question_id ORDER BY at, id)) AS gap
-		  FROM   code_snapshots WHERE attempt_id::text = ANY($1)
+		  FROM   code_snapshots WHERE attempt_id = ANY($1)
 		)
 		SELECT attempt_id::text, question_id::text,
 		       COUNT(*) FILTER (WHERE reason IN ('edit', 'run', 'submit') AND chars_added > 0),
@@ -738,7 +746,7 @@ func (h *IntegrityHandler) codeSignals(ctx context.Context, rep *integrityReport
 	tRows, err := h.Pool.Query(ctx, `
 		SELECT DISTINCT ON (attempt_id, question_id) attempt_id::text, question_id::text, code
 		FROM   code_snapshots
-		WHERE  attempt_id::text = ANY($1) AND code LIKE '%kv\_%'
+		WHERE  attempt_id = ANY($1) AND code LIKE '%kv\_%'
 	`, ids)
 	if err == nil {
 		for tRows.Next() {
@@ -767,7 +775,7 @@ func (h *IntegrityHandler) codeSignals(ctx context.Context, rep *integrityReport
 		WITH s AS (
 		  SELECT attempt_id, question_id, at, reason, chars_added,
 		         EXTRACT(EPOCH FROM at - lag(at) OVER (PARTITION BY attempt_id, question_id ORDER BY at, id)) AS gap
-		  FROM   code_snapshots WHERE attempt_id::text = ANY($1)
+		  FROM   code_snapshots WHERE attempt_id = ANY($1)
 		)
 		SELECT s.attempt_id::text, s.question_id::text, s.at, s.chars_added, COALESCE(s.gap, 0)::float8,
 		       EXISTS (SELECT 1 FROM proctor_events e
@@ -833,7 +841,7 @@ func (h *IntegrityHandler) mcqSignals(ctx context.Context, rep *integrityReport,
 		SELECT attempt_id::text, mcq_question_id::text, COALESCE(array_to_string(selected_options, ','), ''),
 		       COALESCE(awarded_marks, 0)::float8, marks::float8, COALESCE(time_spent_ms, 0)
 		FROM   attempt_questions
-		WHERE  attempt_id::text = ANY($1) AND kind = 'mcq' AND mcq_question_id IS NOT NULL
+		WHERE  attempt_id = ANY($1) AND kind = 'mcq' AND mcq_question_id IS NOT NULL
 	`, ids)
 	if err != nil {
 		return fmt.Errorf("load mcq answers: %w", err)
@@ -938,8 +946,8 @@ func (h *IntegrityHandler) mcqSignals(ctx context.Context, rep *integrityReport,
 func (h *IntegrityHandler) attemptDetail(w http.ResponseWriter, r *http.Request, role, userID, attemptID string) {
 	ctx := r.Context()
 	var assessmentID string
-	if err := h.Pool.QueryRow(ctx, `SELECT assessment_id::text FROM attempts WHERE id::text = $1`, attemptID).Scan(&assessmentID); err != nil {
-		h.fail(w, http.StatusNotFound, "attempt not found")
+	if err := h.Pool.QueryRow(ctx, `SELECT assessment_id::text FROM attempts WHERE id = $1`, attemptID).Scan(&assessmentID); err != nil {
+		writeErr(w, http.StatusNotFound, "attempt not found")
 		return
 	}
 	if !h.mayReview(w, ctx, role, userID, assessmentID) {
@@ -948,7 +956,7 @@ func (h *IntegrityHandler) attemptDetail(w http.ResponseWriter, r *http.Request,
 	rep, err := h.buildReport(ctx, assessmentID)
 	if err != nil {
 		h.Log.Error("integrity report failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not build the integrity report")
+		writeErr(w, http.StatusInternalServerError, "could not build the integrity report")
 		return
 	}
 	var mine *attemptRisk
@@ -968,7 +976,7 @@ func (h *IntegrityHandler) attemptDetail(w http.ResponseWriter, r *http.Request,
 	sessions := []sessionOut{}
 	if rows, err := h.Pool.Query(ctx, `
 		SELECT ip, user_agent, screen, first_seen, last_seen FROM attempt_sessions
-		WHERE attempt_id::text = $1 ORDER BY first_seen
+		WHERE attempt_id = $1 ORDER BY first_seen
 	`, attemptID); err == nil {
 		for rows.Next() {
 			var s sessionOut
@@ -991,7 +999,7 @@ func (h *IntegrityHandler) attemptDetail(w http.ResponseWriter, r *http.Request,
 	snaps := map[string][]snapOut{}
 	if rows, err := h.Pool.Query(ctx, `
 		SELECT question_id::text, at, language, code, reason, chars_added
-		FROM   code_snapshots WHERE attempt_id::text = $1 ORDER BY question_id, at, id
+		FROM   code_snapshots WHERE attempt_id = $1 ORDER BY question_id, at, id
 	`, attemptID); err == nil {
 		for rows.Next() {
 			var qid string
@@ -1005,7 +1013,7 @@ func (h *IntegrityHandler) attemptDetail(w http.ResponseWriter, r *http.Request,
 		rows.Close()
 	}
 
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"risk":      mine,
 		"sessions":  sessions,
 		"snapshots": snaps,
@@ -1084,13 +1092,4 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-func (h *IntegrityHandler) json(w http.ResponseWriter, code int, v any) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (h *IntegrityHandler) fail(w http.ResponseWriter, code int, msg string) {
-	h.json(w, code, map[string]string{"error": msg})
 }

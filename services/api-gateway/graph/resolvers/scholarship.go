@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/knovate211/api-gateway/middleware"
 	pkgauth "github.com/knovate211/pkg/auth"
+	pkgconfig "github.com/knovate211/pkg/config"
 )
 
 // ScholarshipHandler runs the public scholarship funnel: a visitor picks a
@@ -103,12 +103,12 @@ func NewScholarshipHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.Log
 		// So the per-IP cap is sized for a cohort and left tunable, because the
 		// right number depends on the campaign. It is a flood stop, not the
 		// abuse control.
-		ipLimiter: newRateLimiter(envInt("SCHOLARSHIP_IP_LIMIT", 0), envMinutes("SCHOLARSHIP_IP_WINDOW_MIN", 10)),
+		ipLimiter: newRateLimiter(pkgconfig.EnvInt("SCHOLARSHIP_IP_LIMIT", 0), envMinutes("SCHOLARSHIP_IP_WINDOW_MIN", 10)),
 		// This is the abuse control, and it stays tight. Nobody legitimately
 		// applies to the same programme five times in an hour, and a per-address
 		// limit is what stops one person farming accounts or probing which
 		// emails already hold one — neither of which a bigger cohort changes.
-		emailLimiter: newRateLimiter(envInt("SCHOLARSHIP_EMAIL_LIMIT", 5), time.Hour),
+		emailLimiter: newRateLimiter(pkgconfig.EnvInt("SCHOLARSHIP_EMAIL_LIMIT", 5), time.Hour),
 		mailer:       newScholarshipMailer(log),
 	}
 	if err := h.ensureTable(ctx); err != nil {
@@ -209,30 +209,30 @@ func (h *ScholarshipHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch strings.TrimRight(strings.TrimPrefix(r.URL.Path, "/api/scholarship"), "/") {
 	case "/config":
 		if r.Method != http.MethodGet {
-			h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		h.handleConfig(w, r)
 	case "/apply":
 		if r.Method != http.MethodPost {
-			h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		h.handleApply(w, r)
 	case "/claim":
 		if r.Method != http.MethodPost {
-			h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		h.handleClaim(w, r)
 	case "/outcome":
 		if r.Method != http.MethodGet {
-			h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		h.handleOutcome(w, r)
 	default:
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -279,7 +279,7 @@ func (h *ScholarshipHandler) handleConfig(w http.ResponseWriter, r *http.Request
 	`)
 	if err != nil {
 		h.Log.Error("list scholarship programs failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the scholarship programmes")
+		writeErr(w, http.StatusInternalServerError, "could not load the scholarship programmes")
 		return
 	}
 	defer rows.Close()
@@ -293,7 +293,7 @@ func (h *ScholarshipHandler) handleConfig(w http.ResponseWriter, r *http.Request
 		if err := rows.Scan(&p.CourseID, &p.CourseName, &p.Title, &p.DurationMinutes, &p.TotalMarks,
 			&opensAt, &closesAt, &seats, &slabs, &used, &p.SectionSummary); err != nil {
 			h.Log.Error("scan scholarship program failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load the scholarship programmes")
+			writeErr(w, http.StatusInternalServerError, "could not load the scholarship programmes")
 			return
 		}
 		if opensAt != nil {
@@ -318,7 +318,7 @@ func (h *ScholarshipHandler) handleConfig(w http.ResponseWriter, r *http.Request
 	}
 	if err := rows.Err(); err != nil {
 		h.Log.Error("iterate scholarship programs failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the scholarship programmes")
+		writeErr(w, http.StatusInternalServerError, "could not load the scholarship programmes")
 		return
 	}
 
@@ -350,7 +350,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	// Cap the body before decoding — an unauthenticated endpoint should never
 	// read an unbounded request.
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -365,11 +365,11 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	email := strings.ToLower(clip(in.Email, 200))
 	courseID := clip(in.CourseID, 80)
 	if name == "" || !looksLikeEmail(email) {
-		h.fail(w, http.StatusBadRequest, "please provide your name and a valid email address")
+		writeErr(w, http.StatusBadRequest, "please provide your name and a valid email address")
 		return
 	}
 	if courseID == "" {
-		h.fail(w, http.StatusBadRequest, "please choose the course you want to apply for")
+		writeErr(w, http.StatusBadRequest, "please choose the course you want to apply for")
 		return
 	}
 	// Logged separately, and loudly enough to find: a limiter turning real
@@ -378,12 +378,12 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	if !h.ipLimiter.allow(clientIP(r)) {
 		h.Log.Warn("scholarship apply rate limited by IP — raise SCHOLARSHIP_IP_LIMIT if this is a campaign",
 			zap.String("ip", clientIP(r)), zap.String("email", email))
-		h.fail(w, http.StatusTooManyRequests, "too many applications from this network — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many applications from this network — please try again in a few minutes")
 		return
 	}
 	if !h.emailLimiter.allow(email) {
 		h.Log.Warn("scholarship apply rate limited by email", zap.String("email", email))
-		h.fail(w, http.StatusTooManyRequests, "you have applied several times already — please try again later")
+		writeErr(w, http.StatusTooManyRequests, "you have applied several times already — please try again later")
 		return
 	}
 
@@ -403,22 +403,22 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	`, courseID).Scan(&programID, &courseName, &assessmentID, &opensAt, &closesAt, &seats,
 		&assessmentTitle, &assessmentStatus, &durationMinutes, &totalMarks)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusBadRequest, "that course is not open for scholarship applications right now")
+		writeErr(w, http.StatusBadRequest, "that course is not open for scholarship applications right now")
 		return
 	}
 	if err != nil {
 		h.Log.Error("resolve scholarship program failed", zap.Error(err), zap.String("course_id", courseID))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 
 	now := time.Now().UTC()
 	if opensAt != nil && now.Before(*opensAt) {
-		h.fail(w, http.StatusBadRequest, "applications for this course open on "+opensAt.UTC().Format("2 Jan 2006"))
+		writeErr(w, http.StatusBadRequest, "applications for this course open on "+opensAt.UTC().Format("2 Jan 2006"))
 		return
 	}
 	if closesAt != nil && now.After(*closesAt) {
-		h.fail(w, http.StatusBadRequest, "applications for this course have closed")
+		writeErr(w, http.StatusBadRequest, "applications for this course have closed")
 		return
 	}
 	// Handing out a link to an unpublished paper would strand the candidate on
@@ -426,7 +426,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	if assessmentStatus != "published" {
 		h.Log.Warn("scholarship program points at an unpublished assessment",
 			zap.String("course_id", courseID), zap.String("assessment_id", assessmentID))
-		h.fail(w, http.StatusServiceUnavailable, "the test for this course is not open yet — please try again later")
+		writeErr(w, http.StatusServiceUnavailable, "the test for this course is not open yet — please try again later")
 		return
 	}
 
@@ -445,11 +445,11 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	`, email, programID).Scan(&existingStatus, &existingAttemptStatus)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		h.Log.Error("look up existing application failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 	if terminalStatuses[existingStatus] || spentAttempt[existingAttemptStatus] {
-		h.fail(w, http.StatusConflict, "you have already taken the scholarship test for this course")
+		writeErr(w, http.StatusConflict, "you have already taken the scholarship test for this course")
 		return
 	}
 
@@ -461,11 +461,11 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 		if err := h.Pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM scholarship_applications WHERE program_id = $1::uuid`, programID).Scan(&used); err != nil {
 			h.Log.Error("count scholarship seats failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+			writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 			return
 		}
 		if used >= seats {
-			h.fail(w, http.StatusConflict, "all scholarship places for this course have been taken")
+			writeErr(w, http.StatusConflict, "all scholarship places for this course have been taken")
 			return
 		}
 	}
@@ -474,7 +474,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	tx, err := h.Pool.Begin(ctx)
 	if err != nil {
 		h.Log.Error("begin scholarship tx failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 	// Rollback on every path that does not reach Commit; a no-op afterwards.
@@ -493,7 +493,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	placeholder, err := pkgauth.UnusablePassword()
 	if err != nil {
 		h.Log.Error("generate placeholder password failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 
@@ -519,7 +519,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 		RETURNING id::text, (xmax = 0)
 	`, email, name, placeholder).Scan(&userID, &isNewAccount); err != nil {
 		h.Log.Error("upsert scholarship applicant failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 
@@ -530,7 +530,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 			ON CONFLICT (user_id) DO UPDATE SET phone = EXCLUDED.phone, updated_at = now()
 		`, userID, phone); err != nil {
 			h.Log.Error("upsert applicant profile failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+			writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 			return
 		}
 	}
@@ -542,7 +542,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	inviteToken, err := randomToken(24)
 	if err != nil {
 		h.Log.Error("generate invite token failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 	var inviteID string
@@ -555,7 +555,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 		RETURNING id::text, token
 	`, assessmentID, email, userID, inviteToken, now.Add(claimTTL)).Scan(&inviteID, &inviteToken); err != nil {
 		h.Log.Error("upsert scholarship invite failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 
@@ -564,7 +564,7 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 	rawClaim, err := randomToken(32)
 	if err != nil {
 		h.Log.Error("generate claim token failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 	utm := []byte("{}")
@@ -616,13 +616,13 @@ func (h *ScholarshipHandler) handleApply(w http.ResponseWriter, r *http.Request)
 		sha256Hex(rawClaim), now.Add(claimTTL),
 	).Scan(&applicationID); err != nil {
 		h.Log.Error("insert scholarship application failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		h.Log.Error("commit scholarship application failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your application, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your application, please try again")
 		return
 	}
 
@@ -670,19 +670,19 @@ func (h *ScholarshipHandler) handleClaim(w http.ResponseWriter, r *http.Request)
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	raw := clip(body.Token, 200)
 	if raw == "" {
-		h.fail(w, http.StatusBadRequest, "this link is missing its access token")
+		writeErr(w, http.StatusBadRequest, "this link is missing its access token")
 		return
 	}
 	// A claim is a credential check, so it gets its own tighter budget than the
 	// application form's.
 	if !h.ipLimiter.allow("claim:" + clientIP(r)) {
 		h.Log.Warn("scholarship claim rate limited by IP", zap.String("ip", clientIP(r)))
-		h.fail(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
 		return
 	}
 
@@ -703,12 +703,12 @@ func (h *ScholarshipHandler) handleClaim(w http.ResponseWriter, r *http.Request)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Same answer for a token that never existed and one that was replaced,
 		// so this cannot be used to probe for live links.
-		h.fail(w, http.StatusUnauthorized, "this link is no longer valid — please apply again to get a new one")
+		writeErr(w, http.StatusUnauthorized, "this link is no longer valid — please apply again to get a new one")
 		return
 	}
 	if err != nil {
 		h.Log.Error("look up claim token failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your test, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your test, please try again")
 		return
 	}
 
@@ -721,11 +721,11 @@ func (h *ScholarshipHandler) handleClaim(w http.ResponseWriter, r *http.Request)
 		`, appID); err != nil {
 			h.Log.Warn("mark application expired failed", zap.Error(err))
 		}
-		h.fail(w, http.StatusUnauthorized, "this link has expired — please apply again to get a new one")
+		writeErr(w, http.StatusUnauthorized, "this link has expired — please apply again to get a new one")
 		return
 	}
 	if terminalStatuses[status] {
-		h.fail(w, http.StatusConflict, "you have already completed this test")
+		writeErr(w, http.StatusConflict, "you have already completed this test")
 		return
 	}
 	// A claim link is handed to whoever filled in the public form, and that
@@ -737,7 +737,7 @@ func (h *ScholarshipHandler) handleClaim(w http.ResponseWriter, r *http.Request)
 	if role != "applicant" {
 		h.Log.Warn("scholarship claim refused for existing account",
 			zap.String("email", email), zap.String("role", role))
-		h.fail(w, http.StatusConflict,
+		writeErr(w, http.StatusConflict,
 			"you already have a Knovate account — sign in with your password to take this test (use \"Forgot password\" if you need to set one)")
 		return
 	}
@@ -754,7 +754,7 @@ func (h *ScholarshipHandler) handleClaim(w http.ResponseWriter, r *http.Request)
 		WHERE  id = $1::uuid
 	`, appID); err != nil {
 		h.Log.Error("mark application claimed failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your test, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your test, please try again")
 		return
 	}
 
@@ -763,7 +763,7 @@ func (h *ScholarshipHandler) handleClaim(w http.ResponseWriter, r *http.Request)
 	token, err := pkgauth.GenerateToken(userID, email, role, h.jwtSecret, 24*time.Hour)
 	if err != nil {
 		h.Log.Error("mint scholarship session failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your test, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your test, please try again")
 		return
 	}
 
@@ -822,12 +822,12 @@ func bandFor(slabs []awardSlab, percent float64) (awardSlab, bool) {
 func (h *ScholarshipHandler) handleOutcome(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	attemptID := clip(r.URL.Query().Get("attemptId"), 60)
 	if attemptID == "" {
-		h.fail(w, http.StatusBadRequest, "attemptId is required")
+		writeErr(w, http.StatusBadRequest, "attemptId is required")
 		return
 	}
 
@@ -848,7 +848,7 @@ func (h *ScholarshipHandler) handleOutcome(w http.ResponseWriter, r *http.Reques
 	}
 	if err != nil {
 		h.Log.Error("load scholarship outcome failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load your scholarship result")
+		writeErr(w, http.StatusInternalServerError, "could not load your scholarship result")
 		return
 	}
 
@@ -986,7 +986,7 @@ func (h *ScholarshipHandler) ListApplications(w http.ResponseWriter, r *http.Req
 	if err := h.Pool.QueryRow(r.Context(),
 		base+"SELECT COUNT(*) FROM app "+where, args...).Scan(&total); err != nil {
 		h.Log.Error("count scholarship applications failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load applications")
+		writeErr(w, http.StatusInternalServerError, "could not load applications")
 		return
 	}
 
@@ -1002,7 +1002,7 @@ func (h *ScholarshipHandler) ListApplications(w http.ResponseWriter, r *http.Req
 	`, base, where, len(args)+1, len(args)+2), append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
 		h.Log.Error("list scholarship applications failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load applications")
+		writeErr(w, http.StatusInternalServerError, "could not load applications")
 		return
 	}
 	defer rows.Close()
@@ -1015,7 +1015,7 @@ func (h *ScholarshipHandler) ListApplications(w http.ResponseWriter, r *http.Req
 			&a.Qualification, &a.College, &a.GraduationYear, &a.City, &a.Status,
 			&a.AttemptID, &a.Score, &a.MaxScore, &a.AwardPercent, &a.Notes, &created); err != nil {
 			h.Log.Error("scan scholarship application failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load applications")
+			writeErr(w, http.StatusInternalServerError, "could not load applications")
 			return
 		}
 		if a.Score != nil && a.MaxScore != nil && *a.MaxScore > 0 {
@@ -1027,7 +1027,7 @@ func (h *ScholarshipHandler) ListApplications(w http.ResponseWriter, r *http.Req
 	}
 	if err := rows.Err(); err != nil {
 		h.Log.Error("iterate scholarship applications failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load applications")
+		writeErr(w, http.StatusInternalServerError, "could not load applications")
 		return
 	}
 
@@ -1056,7 +1056,7 @@ func (h *ScholarshipHandler) ExportApplications(w http.ResponseWriter, r *http.R
 	`, base, where), args...)
 	if err != nil {
 		h.Log.Error("export scholarship applications failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not export applications")
+		writeErr(w, http.StatusInternalServerError, "could not export applications")
 		return
 	}
 	defer rows.Close()
@@ -1123,7 +1123,7 @@ func (h *ScholarshipHandler) UpdateApplication(w http.ResponseWriter, r *http.Re
 		Notes        string `json:"notes"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	// Only the decision states are settable by hand. The funnel states are
@@ -1132,11 +1132,11 @@ func (h *ScholarshipHandler) UpdateApplication(w http.ResponseWriter, r *http.Re
 	switch body.Status {
 	case "awarded", "rejected", "evaluated", "":
 	default:
-		h.fail(w, http.StatusBadRequest, "status must be evaluated, awarded or rejected")
+		writeErr(w, http.StatusBadRequest, "status must be evaluated, awarded or rejected")
 		return
 	}
 	if body.AwardPercent != nil && (*body.AwardPercent < 0 || *body.AwardPercent > 100) {
-		h.fail(w, http.StatusBadRequest, "award percent must be between 0 and 100")
+		writeErr(w, http.StatusBadRequest, "award percent must be between 0 and 100")
 		return
 	}
 
@@ -1157,12 +1157,12 @@ func (h *ScholarshipHandler) UpdateApplication(w http.ResponseWriter, r *http.Re
 	`, id, body.Status, body.AwardPercent, clip(body.Notes, 2000)).
 		Scan(&name, &email, &courseName, &finalStatus, &finalAward)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "application not found")
+		writeErr(w, http.StatusNotFound, "application not found")
 		return
 	}
 	if err != nil {
 		h.Log.Error("update scholarship application failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update the application")
+		writeErr(w, http.StatusInternalServerError, "could not update the application")
 		return
 	}
 
@@ -1194,24 +1194,24 @@ func (h *ScholarshipHandler) DeleteApplication(w http.ResponseWriter, r *http.Re
 	tx, err := h.Pool.Begin(ctx)
 	if err != nil {
 		h.Log.Error("begin delete application failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not delete the application")
+		writeErr(w, http.StatusInternalServerError, "could not delete the application")
 		return
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	email, accountRemoved, err := h.deleteApplicationTx(ctx, tx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "application not found")
+		writeErr(w, http.StatusNotFound, "application not found")
 		return
 	} else if err != nil {
 		h.Log.Error("delete application failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not delete the application")
+		writeErr(w, http.StatusInternalServerError, "could not delete the application")
 		return
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		h.Log.Error("commit delete application failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not delete the application")
+		writeErr(w, http.StatusInternalServerError, "could not delete the application")
 		return
 	}
 
@@ -1310,30 +1310,30 @@ func (h *ScholarshipHandler) ResendLink(w http.ResponseWriter, r *http.Request, 
 	`, id).Scan(&name, &email, &courseName, &assessmentID, &appStatus,
 		&assessmentTitle, &assessmentStatus, &durationMinutes, &totalMarks, &attemptStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "application not found")
+		writeErr(w, http.StatusNotFound, "application not found")
 		return
 	}
 	if err != nil {
 		h.Log.Error("load application for resend failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not resend the link")
+		writeErr(w, http.StatusInternalServerError, "could not resend the link")
 		return
 	}
 
 	// A candidate who has already sat the paper has nothing to come back to,
 	// and a link implying otherwise would only confuse them.
 	if terminalStatuses[appStatus] || spentAttempt[attemptStatus] {
-		h.fail(w, http.StatusConflict, "this candidate has already taken the test")
+		writeErr(w, http.StatusConflict, "this candidate has already taken the test")
 		return
 	}
 	if assessmentStatus != "published" {
-		h.fail(w, http.StatusConflict, "the paper for this course is not published, so the link would not work")
+		writeErr(w, http.StatusConflict, "the paper for this course is not published, so the link would not work")
 		return
 	}
 
 	raw, err := randomToken(32)
 	if err != nil {
 		h.Log.Error("generate resend token failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not resend the link")
+		writeErr(w, http.StatusInternalServerError, "could not resend the link")
 		return
 	}
 	expires := time.Now().UTC().Add(claimTTL)
@@ -1348,7 +1348,7 @@ func (h *ScholarshipHandler) ResendLink(w http.ResponseWriter, r *http.Request, 
 		WHERE  id = $1::uuid
 	`, id, sha256Hex(raw), expires); err != nil {
 		h.Log.Error("store resent token failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not resend the link")
+		writeErr(w, http.StatusInternalServerError, "could not resend the link")
 		return
 	}
 
@@ -1413,7 +1413,7 @@ func (h *ScholarshipHandler) ListPrograms(w http.ResponseWriter, r *http.Request
 	`)
 	if err != nil {
 		h.Log.Error("list scholarship programs failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load programmes")
+		writeErr(w, http.StatusInternalServerError, "could not load programmes")
 		return
 	}
 	defer rows.Close()
@@ -1426,7 +1426,7 @@ func (h *ScholarshipHandler) ListPrograms(w http.ResponseWriter, r *http.Request
 		if err := rows.Scan(&p.ID, &p.CourseID, &p.CourseName, &p.AssessmentID, &p.Title, &p.Status,
 			&p.IsActive, &opensAt, &closesAt, &p.Seats, &slabs, &p.Used); err != nil {
 			h.Log.Error("scan scholarship program failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load programmes")
+			writeErr(w, http.StatusInternalServerError, "could not load programmes")
 			return
 		}
 		if opensAt != nil {
@@ -1440,7 +1440,7 @@ func (h *ScholarshipHandler) ListPrograms(w http.ResponseWriter, r *http.Request
 	}
 	if err := rows.Err(); err != nil {
 		h.Log.Error("iterate scholarship programs failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load programmes")
+		writeErr(w, http.StatusInternalServerError, "could not load programmes")
 		return
 	}
 
@@ -1469,14 +1469,14 @@ func (h *ScholarshipHandler) UpsertProgram(w http.ResponseWriter, r *http.Reques
 		AwardSlabs   json.RawMessage `json:"award_slabs"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	courseID := clip(body.CourseID, 80)
 	courseName := clip(body.CourseName, 160)
 	assessmentID := clip(body.AssessmentID, 60)
 	if courseID == "" || courseName == "" || assessmentID == "" {
-		h.fail(w, http.StatusBadRequest, "course_id, course_name and assessment_id are required")
+		writeErr(w, http.StatusBadRequest, "course_id, course_name and assessment_id are required")
 		return
 	}
 
@@ -1487,16 +1487,16 @@ func (h *ScholarshipHandler) UpsertProgram(w http.ResponseWriter, r *http.Reques
 	err := h.Pool.QueryRow(r.Context(),
 		`SELECT purpose FROM assessments WHERE id = $1::uuid`, assessmentID).Scan(&purpose)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusBadRequest, "no assessment with that id")
+		writeErr(w, http.StatusBadRequest, "no assessment with that id")
 		return
 	}
 	if err != nil {
 		h.Log.Error("look up assessment purpose failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not save the programme")
+		writeErr(w, http.StatusInternalServerError, "could not save the programme")
 		return
 	}
 	if purpose != "scholarship" && purpose != "hiring" {
-		h.fail(w, http.StatusBadRequest,
+		writeErr(w, http.StatusBadRequest,
 			"that assessment is a practice test — a scholarship paper must have purpose 'scholarship' so it stays invite-only")
 		return
 	}
@@ -1540,7 +1540,7 @@ func (h *ScholarshipHandler) UpsertProgram(w http.ResponseWriter, r *http.Reques
 	`, courseID, courseName, assessmentID, body.IsActive, opensAt, closesAt, body.Seats, slabs,
 		body.OpensAt != nil, body.ClosesAt != nil).Scan(&id); err != nil {
 		h.Log.Error("upsert scholarship program failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not save the programme")
+		writeErr(w, http.StatusInternalServerError, "could not save the programme")
 		return
 	}
 
@@ -1615,20 +1615,8 @@ func (h *ScholarshipHandler) ExpireStaleApplications(ctx context.Context) (int64
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// envInt reads a positive integer setting, falling back when unset or nonsense.
-// A misconfigured limit should degrade to the default rather than to zero,
-// which would refuse every request.
-func envInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return fallback
-}
-
 func envMinutes(key string, fallback int) time.Duration {
-	return time.Duration(envInt(key, fallback)) * time.Minute
+	return time.Duration(pkgconfig.EnvInt(key, fallback)) * time.Minute
 }
 
 // randomToken returns a URL-safe token from crypto/rand. math/rand would be
@@ -1666,11 +1654,6 @@ func (h *ScholarshipHandler) ok(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 }
 
-func (h *ScholarshipHandler) fail(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
-
 // EnrolApplicant promotes an applicant to a student and grants them the course.
 //
 // This is the only way somebody crosses from "sat our test" to "is on the
@@ -1683,12 +1666,12 @@ func (h *ScholarshipHandler) fail(w http.ResponseWriter, code int, msg string) {
 // attached would show up in the Users list as a phantom enrolment.
 func (h *ScholarshipHandler) EnrolApplicant(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	id = clip(id, 60)
 	if id == "" {
-		h.fail(w, http.StatusBadRequest, "application id is required")
+		writeErr(w, http.StatusBadRequest, "application id is required")
 		return
 	}
 
@@ -1696,7 +1679,7 @@ func (h *ScholarshipHandler) EnrolApplicant(w http.ResponseWriter, r *http.Reque
 	tx, err := h.Pool.Begin(ctx)
 	if err != nil {
 		h.Log.Error("begin enrol failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not enrol this applicant")
+		writeErr(w, http.StatusInternalServerError, "could not enrol this applicant")
 		return
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
@@ -1709,12 +1692,12 @@ func (h *ScholarshipHandler) EnrolApplicant(w http.ResponseWriter, r *http.Reque
 		WHERE  s.id = $1::uuid
 	`, id).Scan(&userID, &email, &courseID, &courseName)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "application not found")
+		writeErr(w, http.StatusNotFound, "application not found")
 		return
 	}
 	if err != nil {
 		h.Log.Error("load application for enrol failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not enrol this applicant")
+		writeErr(w, http.StatusInternalServerError, "could not enrol this applicant")
 		return
 	}
 
@@ -1725,7 +1708,7 @@ func (h *ScholarshipHandler) EnrolApplicant(w http.ResponseWriter, r *http.Reque
 		 WHERE id = $1::uuid AND role = 'applicant'
 	`, userID); err != nil {
 		h.Log.Error("promote applicant failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not enrol this applicant")
+		writeErr(w, http.StatusInternalServerError, "could not enrol this applicant")
 		return
 	}
 
@@ -1736,13 +1719,13 @@ func (h *ScholarshipHandler) EnrolApplicant(w http.ResponseWriter, r *http.Reque
 		ON CONFLICT DO NOTHING
 	`, userID, courseID); err != nil {
 		h.Log.Error("grant course failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not enrol this applicant")
+		writeErr(w, http.StatusInternalServerError, "could not enrol this applicant")
 		return
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		h.Log.Error("commit enrol failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not enrol this applicant")
+		writeErr(w, http.StatusInternalServerError, "could not enrol this applicant")
 		return
 	}
 

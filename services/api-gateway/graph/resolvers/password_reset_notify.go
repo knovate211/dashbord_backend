@@ -1,8 +1,6 @@
 package resolvers
 
 import (
-	"net/smtp"
-	"os"
 	"strings"
 
 	"go.uber.org/zap"
@@ -19,22 +17,14 @@ import (
 // putting a live reset code in the logs, so it is loud about when it applies
 // and must not be how production runs.
 type resetMailer struct {
-	host string
-	port string
-	user string
-	pass string
-	from string
-	log  *zap.Logger
+	smtpConfig
+	log *zap.Logger
 }
 
 func newResetMailer(log *zap.Logger) *resetMailer {
 	m := &resetMailer{
-		host: os.Getenv("SMTP_HOST"),
-		port: envOr("SMTP_PORT", "587"),
-		user: os.Getenv("SMTP_USER"),
-		pass: os.Getenv("SMTP_PASS"),
-		from: envOr("SMTP_FROM", os.Getenv("SMTP_USER")),
-		log:  log,
+		smtpConfig: loadSMTPConfig(),
+		log:        log,
 	}
 	if m.host == "" {
 		log.Warn("password reset email disabled (SMTP_HOST unset) — " +
@@ -89,18 +79,7 @@ func (m *resetMailer) sendCode(email, name, code string) {
 		body,
 	}, "\r\n"))
 
-	// Only offer credentials when there are credentials to offer. Go's
-	// PlainAuth refuses to send a username over an unencrypted connection
-	// to anything but localhost, so passing an empty auth turns every
-	// no-auth relay — a local mail catcher, an internal smarthost, SES on
-	// an allow-listed IP — into "unencrypted connection" instead of a sent
-	// email. SendMail accepts a nil auth and simply skips AUTH.
-	var auth smtp.Auth
-	if m.user != "" {
-		auth = smtp.PlainAuth("", m.user, m.pass, m.host)
-	}
-	addr := m.host + ":" + m.port
-	if err := smtp.SendMail(addr, auth, m.from, []string{email}, msg); err != nil {
+	if err := m.sendMail([]string{email}, msg); err != nil {
 		// The code is already stored, so the learner can retry; this is a
 		// delivery failure, not a lost reset.
 		m.log.Error("password reset email failed to send",

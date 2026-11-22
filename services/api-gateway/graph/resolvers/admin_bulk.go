@@ -12,6 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
+
+	"github.com/knovate211/pkg/ids"
 )
 
 // Filter facets, bulk actions and export for the enquiry and scholarship
@@ -78,7 +80,7 @@ func (h *AdminHandler) facetQuery(ctx context.Context, sql string, args ...any) 
 // counts, so dropdowns only offer options that match something.
 func (h *AdminHandler) handleInquiryFacets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   h.facetQuery(ctx, `SELECT status, '', COUNT(*)::int FROM inquiries GROUP BY status ORDER BY 3 DESC`),
 		"source":   h.facetQuery(ctx, `SELECT source, '', COUNT(*)::int FROM inquiries GROUP BY source ORDER BY 3 DESC`),
 		"interest": h.facetQuery(ctx, `SELECT interest, '', COUNT(*)::int FROM inquiries WHERE interest <> '' GROUP BY interest ORDER BY 3 DESC`),
@@ -89,7 +91,7 @@ func (h *AdminHandler) handleInquiryFacets(w http.ResponseWriter, r *http.Reques
 func (h *AdminHandler) handleInquiryBulk(w http.ResponseWriter, r *http.Request) {
 	var req bulkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	switch req.Action {
@@ -98,11 +100,11 @@ func (h *AdminHandler) handleInquiryBulk(w http.ResponseWriter, r *http.Request)
 		switch req.Status {
 		case "new", "contacted", "closed", "spam":
 		default:
-			h.jsonErr(w, http.StatusBadRequest, "status must be new, contacted, closed or spam")
+			writeErr(w, http.StatusBadRequest, "status must be new, contacted, closed or spam")
 			return
 		}
 	default:
-		h.jsonErr(w, http.StatusBadRequest, "action must be status or delete")
+		writeErr(w, http.StatusBadRequest, "action must be status or delete")
 		return
 	}
 
@@ -113,29 +115,29 @@ func (h *AdminHandler) handleInquiryBulk(w http.ResponseWriter, r *http.Request)
 		var err error
 		if ids, err = h.collectIDs(ctx, `SELECT id::text FROM inquiries `+where, args...); err != nil {
 			h.Log.Error("resolve enquiry filter failed", zap.Error(err))
-			h.jsonErr(w, http.StatusInternalServerError, "bulk action failed")
+			writeErr(w, http.StatusInternalServerError, "bulk action failed")
 			return
 		}
 	} else {
-		ids = req.IDs
+		ids = onlyUUIDs(req.IDs)
 	}
 	if msg := checkBulkSize(req, len(ids)); msg != "" {
-		h.jsonErr(w, http.StatusBadRequest, msg)
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 
 	var sql string
 	args := []any{ids}
 	if req.Action == "delete" {
-		sql = `DELETE FROM inquiries WHERE id::text = ANY($1) RETURNING email`
+		sql = `DELETE FROM inquiries WHERE id = ANY($1) RETURNING email`
 	} else {
-		sql = `UPDATE inquiries SET status = $2, updated_at = now() WHERE id::text = ANY($1) RETURNING email`
+		sql = `UPDATE inquiries SET status = $2, updated_at = now() WHERE id = ANY($1) RETURNING email`
 		args = append(args, req.Status)
 	}
 	emails, err := h.collectIDs(ctx, sql, args...)
 	if err != nil {
 		h.Log.Error("enquiry bulk action failed", zap.String("action", req.Action), zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "bulk action failed")
+		writeErr(w, http.StatusInternalServerError, "bulk action failed")
 		return
 	}
 
@@ -151,7 +153,7 @@ func (h *AdminHandler) handleInquiryBulk(w http.ResponseWriter, r *http.Request)
 	if len(emails) > 0 {
 		h.audit(ctx, action, "", "", detail)
 	}
-	h.json(w, http.StatusOK, map[string]int{"affected": len(emails), "requested": len(ids)})
+	writeJSON(w, http.StatusOK, map[string]int{"affected": len(emails), "requested": len(ids)})
 }
 
 // GET /api/admin/inquiries/export.csv — same filters as the table.
@@ -163,7 +165,7 @@ func (h *AdminHandler) handleInquiryExport(w http.ResponseWriter, r *http.Reques
 		FROM inquiries `+where+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		h.Log.Error("export enquiries failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to export enquiries")
+		writeErr(w, http.StatusInternalServerError, "failed to export enquiries")
 		return
 	}
 	defer rows.Close()
@@ -200,7 +202,7 @@ func (h *AdminHandler) handleInquiryExport(w http.ResponseWriter, r *http.Reques
 func (h *AdminHandler) handleScholarshipFacets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	base, _, _ := applicationQuery(url.Values{})
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status": h.facetQuery(ctx, base+`SELECT status, '', COUNT(*)::int FROM app GROUP BY status ORDER BY 3 DESC`),
 		"course": h.facetQuery(ctx, base+`SELECT course_id, MIN(course_name), COUNT(*)::int FROM app GROUP BY course_id ORDER BY 3 DESC`),
 	})
@@ -214,11 +216,11 @@ func (h *AdminHandler) handleScholarshipFacets(w http.ResponseWriter, r *http.Re
 func (h *AdminHandler) handleScholarshipBulk(w http.ResponseWriter, r *http.Request) {
 	var req bulkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Action != "delete" {
-		h.jsonErr(w, http.StatusBadRequest, "action must be delete")
+		writeErr(w, http.StatusBadRequest, "action must be delete")
 		return
 	}
 
@@ -229,20 +231,20 @@ func (h *AdminHandler) handleScholarshipBulk(w http.ResponseWriter, r *http.Requ
 		var err error
 		if ids, err = h.collectIDs(ctx, base+`SELECT id::text FROM app `+where, args...); err != nil {
 			h.Log.Error("resolve scholarship filter failed", zap.Error(err))
-			h.jsonErr(w, http.StatusInternalServerError, "bulk delete failed")
+			writeErr(w, http.StatusInternalServerError, "bulk delete failed")
 			return
 		}
 	} else {
 		ids = req.IDs
 	}
 	if msg := checkBulkSize(req, len(ids)); msg != "" {
-		h.jsonErr(w, http.StatusBadRequest, msg)
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 
 	tx, err := h.Pool.Begin(ctx)
 	if err != nil {
-		h.jsonErr(w, http.StatusInternalServerError, "bulk delete failed")
+		writeErr(w, http.StatusInternalServerError, "bulk delete failed")
 		return
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
@@ -255,7 +257,7 @@ func (h *AdminHandler) handleScholarshipBulk(w http.ResponseWriter, r *http.Requ
 		}
 		if err != nil {
 			h.Log.Error("bulk delete application failed", zap.String("id", id), zap.Error(err))
-			h.jsonErr(w, http.StatusInternalServerError, "bulk delete failed — nothing was deleted")
+			writeErr(w, http.StatusInternalServerError, "bulk delete failed — nothing was deleted")
 			return
 		}
 		deleted++
@@ -265,7 +267,7 @@ func (h *AdminHandler) handleScholarshipBulk(w http.ResponseWriter, r *http.Requ
 	}
 	if err := tx.Commit(ctx); err != nil {
 		h.Log.Error("commit bulk delete failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "bulk delete failed — nothing was deleted")
+		writeErr(w, http.StatusInternalServerError, "bulk delete failed — nothing was deleted")
 		return
 	}
 
@@ -276,7 +278,7 @@ func (h *AdminHandler) handleScholarshipBulk(w http.ResponseWriter, r *http.Requ
 	if deleted > 0 {
 		h.audit(ctx, "scholarships.deleted", "", "", detail)
 	}
-	h.json(w, http.StatusOK, map[string]int{"affected": deleted, "requested": len(ids), "accounts_removed": accounts})
+	writeJSON(w, http.StatusOK, map[string]int{"affected": deleted, "requested": len(ids), "accounts_removed": accounts})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +303,20 @@ func (h *AdminHandler) collectIDs(ctx context.Context, sql string, args ...any) 
 }
 
 // checkBulkSize returns a user-facing error, or "" when the request may proceed.
+// onlyUUIDs drops ids that are not well-formed UUIDs. They could never match
+// a row, and passing one to "id = ANY($1)" makes Postgres reject the whole
+// query; comparing the uuid column directly (rather than id::text) is what
+// lets the bulk statements use the primary-key index.
+func onlyUUIDs(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, id := range in {
+		if ids.IsUUID(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func checkBulkSize(req bulkRequest, n int) string {
 	switch {
 	case n == 0:

@@ -16,7 +16,6 @@ import (
 const (
 	ttlProblemList     = 5 * time.Minute
 	ttlProblemDetail   = 15 * time.Minute
-	ttlPracticeSets    = 10 * time.Minute
 	ttlUserStatus      = 2 * time.Minute
 )
 
@@ -97,38 +96,6 @@ func (c *ProblemCache) SetProblem(ctx context.Context, p *problemv1.Problem) err
 	return err
 }
 
-// ── Practice Sets ─────────────────────────────────────────────────────────────
-
-func practiceSetKey(userID string) string {
-	if userID == "" {
-		return "practice_sets:all"
-	}
-	return "practice_sets:user:" + userID
-}
-
-func (c *ProblemCache) GetPracticeSets(ctx context.Context, userID string) (*problemv1.ListPracticeSetsResponse, error) {
-	if !c.available() {
-		return nil, fmt.Errorf("cache unavailable")
-	}
-	data, err := c.client.Get(ctx, practiceSetKey(userID)).Bytes()
-	if err != nil {
-		return nil, err
-	}
-	var resp problemv1.ListPracticeSetsResponse
-	return &resp, json.Unmarshal(data, &resp)
-}
-
-func (c *ProblemCache) SetPracticeSets(ctx context.Context, userID string, resp *problemv1.ListPracticeSetsResponse) error {
-	if !c.available() {
-		return nil
-	}
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return err
-	}
-	return c.client.Set(ctx, practiceSetKey(userID), data, ttlPracticeSets).Err()
-}
-
 // ── User Status ───────────────────────────────────────────────────────────────
 
 func userStatusKey(userID, problemID string) string {
@@ -158,15 +125,32 @@ func (c *ProblemCache) SetUserStatus(ctx context.Context, s *problemv1.ProblemUs
 	return c.client.Set(ctx, userStatusKey(s.UserId, s.ProblemId), data, ttlUserStatus).Err()
 }
 
-// InvalidateProblem removes cached entries for a problem (call on update).
+// InvalidateProblem drops every cached view that can contain a problem: its
+// detail (cached under both id and slug) and every problem list (titles and
+// difficulty appear there). Called after an admin creates, edits or deletes one.
+//
+// Practice-set summaries are deliberately not cached: they carry each
+// learner's progress, which changes in another service when they solve a
+// problem, and the query behind them runs in about a millisecond.
+//
+// List keys embed their filters, so they are found with SCAN; DEL does not
+// expand a glob, which is why the earlier "problems:list:*" never matched.
 func (c *ProblemCache) InvalidateProblem(ctx context.Context, id, slug string) {
 	if !c.available() {
 		return
 	}
-	keys := []string{problemKey(id), problemKey(slug), "problems:list:*"}
-	for _, k := range keys {
-		if err := c.client.Del(ctx, k).Err(); err != nil {
-			c.log.Warn("cache invalidation failed", zap.String("key", k), zap.Error(err))
+	keys := []string{problemKey(id)}
+	if slug != "" {
+		keys = append(keys, problemKey(slug))
 		}
+	iter := c.client.Scan(ctx, 0, "problems:list:*", 200).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		c.log.Warn("cache invalidation scan failed", zap.Error(err))
+	}
+	if err := c.client.Del(ctx, keys...).Err(); err != nil {
+		c.log.Warn("cache invalidation failed", zap.Strings("keys", keys), zap.Error(err))
 	}
 }

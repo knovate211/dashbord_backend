@@ -181,6 +181,16 @@ type ProblemUserStatus struct {
 	Attempts  int32  `json:"attempts"`
 }
 
+// InvalidateProblemRequest names a problem whose cached copies should be dropped
+// because an admin changed or deleted it. Slug is optional but should be sent:
+// the detail is cached under both keys.
+type InvalidateProblemRequest struct {
+	Id   string `json:"id"`
+	Slug string `json:"slug"`
+}
+
+type InvalidateProblemResponse struct{}
+
 // ─── Server Interface ─────────────────────────────────────────────────────────
 
 type ProblemServiceServer interface {
@@ -189,6 +199,7 @@ type ProblemServiceServer interface {
 	GetTestCases(context.Context, *GetTestCasesRequest) (*GetTestCasesResponse, error)
 	ListPracticeSets(context.Context, *ListPracticeSetsRequest) (*ListPracticeSetsResponse, error)
 	GetProblemUserStatus(context.Context, *GetProblemUserStatusRequest) (*ProblemUserStatus, error)
+	InvalidateProblem(context.Context, *InvalidateProblemRequest) (*InvalidateProblemResponse, error)
 }
 
 // UnimplementedProblemServiceServer returns codes.Unimplemented for every method.
@@ -209,6 +220,9 @@ func (UnimplementedProblemServiceServer) ListPracticeSets(context.Context, *List
 func (UnimplementedProblemServiceServer) GetProblemUserStatus(context.Context, *GetProblemUserStatusRequest) (*ProblemUserStatus, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetProblemUserStatus not implemented")
 }
+func (UnimplementedProblemServiceServer) InvalidateProblem(context.Context, *InvalidateProblemRequest) (*InvalidateProblemResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InvalidateProblem not implemented")
+}
 
 // ─── Client Interface & Implementation ───────────────────────────────────────
 
@@ -218,6 +232,7 @@ type ProblemServiceClient interface {
 	GetTestCases(ctx context.Context, in *GetTestCasesRequest, opts ...grpc.CallOption) (*GetTestCasesResponse, error)
 	ListPracticeSets(ctx context.Context, in *ListPracticeSetsRequest, opts ...grpc.CallOption) (*ListPracticeSetsResponse, error)
 	GetProblemUserStatus(ctx context.Context, in *GetProblemUserStatusRequest, opts ...grpc.CallOption) (*ProblemUserStatus, error)
+	InvalidateProblem(ctx context.Context, in *InvalidateProblemRequest, opts ...grpc.CallOption) (*InvalidateProblemResponse, error)
 }
 
 type problemServiceClient struct{ cc grpc.ClientConnInterface }
@@ -266,6 +281,14 @@ func (c *problemServiceClient) GetProblemUserStatus(ctx context.Context, in *Get
 	return out, nil
 }
 
+func (c *problemServiceClient) InvalidateProblem(ctx context.Context, in *InvalidateProblemRequest, opts ...grpc.CallOption) (*InvalidateProblemResponse, error) {
+	out := new(InvalidateProblemResponse)
+	if err := c.cc.Invoke(ctx, "/problem.v1.ProblemService/InvalidateProblem", in, out, opts...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ─── Service Registration & Descriptor ───────────────────────────────────────
 
 func RegisterProblemServiceServer(s grpc.ServiceRegistrar, srv ProblemServiceServer) {
@@ -281,6 +304,7 @@ var ProblemService_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "GetTestCases", Handler: _ProblemService_GetTestCases_Handler},
 		{MethodName: "ListPracticeSets", Handler: _ProblemService_ListPracticeSets_Handler},
 		{MethodName: "GetProblemUserStatus", Handler: _ProblemService_GetProblemUserStatus_Handler},
+		{MethodName: "InvalidateProblem", Handler: _ProblemService_InvalidateProblem_Handler},
 	},
 	Streams: []grpc.StreamDesc{},
 }
@@ -352,5 +376,19 @@ func _ProblemService_GetProblemUserStatus_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, &grpc.UnaryServerInfo{Server: srv, FullMethod: "/problem.v1.ProblemService/GetProblemUserStatus"},
 		func(ctx context.Context, req interface{}) (interface{}, error) {
 			return srv.(ProblemServiceServer).GetProblemUserStatus(ctx, req.(*GetProblemUserStatusRequest))
+		})
+}
+
+func _ProblemService_InvalidateProblem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InvalidateProblemRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProblemServiceServer).InvalidateProblem(ctx, in)
+	}
+	return interceptor(ctx, in, &grpc.UnaryServerInfo{Server: srv, FullMethod: "/problem.v1.ProblemService/InvalidateProblem"},
+		func(ctx context.Context, req interface{}) (interface{}, error) {
+			return srv.(ProblemServiceServer).InvalidateProblem(ctx, req.(*InvalidateProblemRequest))
 		})
 }

@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+
+	pkgconfig "github.com/knovate211/pkg/config"
 )
 
 // InquiryHandler captures leads from the public marketing site and serves them
@@ -49,8 +51,8 @@ func NewInquiryHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger)
 		// NAT address, and blocking it during a drive loses real enquiries.
 		// Abuse is handled by the honeypot and the per-email cap below.
 		// INQUIRY_IP_LIMIT > 0 turns an IP cap back on.
-		limiter:      newRateLimiter(envInt("INQUIRY_IP_LIMIT", 0), envMinutes("INQUIRY_IP_WINDOW_MIN", 10)),
-		emailLimiter: newRateLimiter(envInt("INQUIRY_EMAIL_LIMIT", 5), time.Hour),
+		limiter:      newRateLimiter(pkgconfig.EnvInt("INQUIRY_IP_LIMIT", 0), envMinutes("INQUIRY_IP_WINDOW_MIN", 10)),
+		emailLimiter: newRateLimiter(pkgconfig.EnvInt("INQUIRY_EMAIL_LIMIT", 5), time.Hour),
 		mailer:       newMailer(log),
 	}
 	if err := h.ensureTable(ctx); err != nil {
@@ -129,7 +131,7 @@ func (h *InquiryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		h.fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
@@ -137,7 +139,7 @@ func (h *InquiryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Cap the body before decoding — an unauthenticated endpoint should never
 	// read an unbounded request.
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -150,12 +152,12 @@ func (h *InquiryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name := clip(in.Name, 120)
 	email := strings.ToLower(clip(in.Email, 200))
 	if name == "" || !looksLikeEmail(email) {
-		h.fail(w, http.StatusBadRequest, "please provide your name and a valid email address")
+		writeErr(w, http.StatusBadRequest, "please provide your name and a valid email address")
 		return
 	}
 
 	if !h.limiter.allow(clientIP(r)) || !h.emailLimiter.allow(email) {
-		h.fail(w, http.StatusTooManyRequests, "too many submissions — please try again shortly")
+		writeErr(w, http.StatusTooManyRequests, "too many submissions — please try again shortly")
 		return
 	}
 
@@ -168,7 +170,7 @@ func (h *InquiryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		clip(in.Company, 160), clip(in.JobTitle, 120), clip(in.CompanySize, 40), clip(in.HiringVolume, 40))
 	if err != nil {
 		h.Log.Error("save inquiry failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not submit your enquiry, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not submit your enquiry, please try again")
 		return
 	}
 
@@ -229,11 +231,6 @@ func (h *InquiryHandler) ok(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 }
 
-func (h *InquiryHandler) fail(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
-
 // ─── Admin listing ────────────────────────────────────────────────────────────
 
 type inquiryRow struct {
@@ -273,7 +270,7 @@ func (h *InquiryHandler) ListInquiries(w http.ResponseWriter, r *http.Request) {
 	var total int
 	if err := h.Pool.QueryRow(r.Context(), "SELECT COUNT(*) FROM inquiries "+where, args...).Scan(&total); err != nil {
 		h.Log.Error("count inquiries failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load enquiries")
+		writeErr(w, http.StatusInternalServerError, "could not load enquiries")
 		return
 	}
 
@@ -286,7 +283,7 @@ func (h *InquiryHandler) ListInquiries(w http.ResponseWriter, r *http.Request) {
 	`, where, len(args)+1, len(args)+2), append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
 		h.Log.Error("list inquiries failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load enquiries")
+		writeErr(w, http.StatusInternalServerError, "could not load enquiries")
 		return
 	}
 	defer rows.Close()
@@ -299,7 +296,7 @@ func (h *InquiryHandler) ListInquiries(w http.ResponseWriter, r *http.Request) {
 			&i.Source, &i.PageURL, &i.Status, &i.Notes, &created,
 			&i.Company, &i.JobTitle, &i.CompanySize, &i.HiringVolume); err != nil {
 			h.Log.Error("scan inquiry failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load enquiries")
+			writeErr(w, http.StatusInternalServerError, "could not load enquiries")
 			return
 		}
 		i.CreatedAt = created.Format(time.RFC3339)
@@ -356,13 +353,13 @@ func (h *InquiryHandler) UpdateInquiry(w http.ResponseWriter, r *http.Request, i
 		Notes  string `json:"notes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	switch body.Status {
 	case "new", "contacted", "closed", "spam":
 	default:
-		h.fail(w, http.StatusBadRequest, "status must be new, contacted, closed or spam")
+		writeErr(w, http.StatusBadRequest, "status must be new, contacted, closed or spam")
 		return
 	}
 
@@ -371,11 +368,11 @@ func (h *InquiryHandler) UpdateInquiry(w http.ResponseWriter, r *http.Request, i
 	`, id, body.Status, clip(body.Notes, 2000))
 	if err != nil {
 		h.Log.Error("update inquiry failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not update the enquiry")
+		writeErr(w, http.StatusInternalServerError, "could not update the enquiry")
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		h.fail(w, http.StatusNotFound, "enquiry not found")
+		writeErr(w, http.StatusNotFound, "enquiry not found")
 		return
 	}
 	h.ok(w)

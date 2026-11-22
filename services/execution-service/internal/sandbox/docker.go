@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,6 +48,12 @@ type RunRequest struct {
 	// normally generated around a solution function. Scratchpad code is a
 	// complete program with its own entry point, so wrapping it would break it.
 	Raw bool
+
+	// MaxQueueWait bounds how long the run may wait for a free container slot
+	// before giving up with ErrBusy. Zero waits as long as the context allows,
+	// which is right for queued submissions; an interactive Run sets it so a
+	// learner hears "busy" quickly instead of after a minute-long timeout.
+	MaxQueueWait time.Duration
 }
 
 // RunResult is the output from executing one test case in the sandbox.
@@ -155,6 +162,9 @@ func pidsLimit() int64 {
 // memory here and then shipped through NATS.
 const maxOutputBytes = 1 << 20
 
+// ErrBusy means every container slot stayed taken for the run's MaxQueueWait.
+var ErrBusy = errors.New("all code runners are busy")
+
 // Run executes code for a single test case and returns the raw output.
 func (s *DockerSandbox) Run(ctx context.Context, req *RunRequest) (*RunResult, error) {
 	image, ok := languageImages[req.Language]
@@ -163,11 +173,19 @@ func (s *DockerSandbox) Run(ctx context.Context, req *RunRequest) (*RunResult, e
 	}
 
 	// Wait for a slot before anything is timed. A queued run is a slow run, not
-	// a failed one.
+	// a failed one — unless the caller set a limit on the wait.
 	if s.slots != nil {
+		var giveUp <-chan time.Time
+		if req.MaxQueueWait > 0 {
+			t := time.NewTimer(req.MaxQueueWait)
+			defer t.Stop()
+			giveUp = t.C
+		}
 		select {
 		case s.slots <- struct{}{}:
 			defer func() { <-s.slots }()
+		case <-giveUp:
+			return nil, ErrBusy
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

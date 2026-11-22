@@ -22,7 +22,18 @@ service ProblemService {
 
   // Get problem status (user-specific — requires user_id in metadata)
   rpc GetProblemUserStatus(GetProblemUserStatusRequest) returns (ProblemUserStatus);
+
+  // Drop cached copies of a problem after an admin edits or deletes it
+  // (INTERNAL ONLY — called by the API gateway's admin screens)
+  rpc InvalidateProblem(InvalidateProblemRequest) returns (InvalidateProblemResponse);
 }
+
+message InvalidateProblemRequest {
+  string id   = 1;
+  string slug = 2;
+}
+
+message InvalidateProblemResponse {}
 
 // ──────────────────────────────────────────────────────────
 // Messages — Problems

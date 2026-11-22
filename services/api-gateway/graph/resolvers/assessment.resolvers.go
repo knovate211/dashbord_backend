@@ -203,6 +203,11 @@ func (c *AssessmentClients) RunAttemptCode(p graphql.ResolveParams) (interface{}
 		return nil, err
 	}
 
+	if !learnerRuns.acquire(userID) {
+		return nil, errRunInFlight
+	}
+	defer learnerRuns.release(userID)
+
 	resp, err := c.AssessmentSvc.RunAttemptCode(p.Context, &assessmentv1.RunAttemptCodeRequest{
 		AttemptId:  stringArg(p, "attemptId"),
 		UserId:     userID,

@@ -2,7 +2,6 @@ package resolvers
 
 import (
 	"bytes"
-	"html/template"
 
 	"go.uber.org/zap"
 )
@@ -47,13 +46,7 @@ type applicantMail struct {
 // assessment invitations: a banded header, what the test is, what to expect,
 // then one unmissable button with a copyable link underneath for the clients
 // that strip buttons.
-var applicantTemplate = template.Must(template.New("applicant").Parse(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:{{.Cream}};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{{.Cream}};padding:24px 12px;">
-<tr><td align="center">
-  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid {{.Border}};border-radius:10px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
-
+var applicantTemplate = brandedEmail("applicant", `
     <tr><td style="background:{{.Ink}};padding:26px 32px;">
       <div style="color:#ffffff;font-size:21px;font-weight:700;line-height:1.3;">{{.CourseName}} Scholarship Test</div>
       <div style="color:#b9b1a4;font-size:13px;padding-top:5px;">Powered by Knovate</div>
@@ -118,10 +111,7 @@ var applicantTemplate = template.Must(template.New("applicant").Parse(`<!DOCTYPE
       Good luck.<br>— Team Knovate
     </td></tr>
 
-  </table>
-</td></tr>
-</table>
-</body></html>`))
+`)
 
 func applicantHTML(name, courseName, testTitle, testURL string, duration, totalMarks int32, isNewAccount bool) string {
 	var buf bytes.Buffer
@@ -139,13 +129,7 @@ func applicantHTML(name, courseName, testTitle, testURL string, duration, totalM
 	return buf.String()
 }
 
-var awardTemplate = template.Must(template.New("award").Parse(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:{{.Cream}};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{{.Cream}};padding:24px 12px;">
-<tr><td align="center">
-  <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border:1px solid {{.Border}};border-radius:10px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
-    <tr><td style="background:{{.Ink}};padding:26px 32px;">
+var awardTemplate = brandedEmail("award", `    <tr><td style="background:{{.Ink}};padding:26px 32px;">
       <div style="color:#ffffff;font-size:21px;font-weight:700;">Knovate Scholarship</div>
       <div style="color:#b9b1a4;font-size:13px;padding-top:5px;">{{.CourseName}}</div>
     </td></tr>
@@ -167,10 +151,7 @@ var awardTemplate = template.Must(template.New("award").Parse(`<!DOCTYPE html>
       <p style="margin:0;">Congratulations, and welcome.</p>
     </td></tr>
     <tr><td style="background:{{.Cream}};padding:16px 32px;font-size:12px;color:{{.Muted}};border-top:1px solid {{.Border}};">— Team Knovate</td></tr>
-  </table>
-</td></tr>
-</table>
-</body></html>`))
+`)
 
 func awardHTML(name, courseName string, awardPercent int) string {
 	var buf bytes.Buffer

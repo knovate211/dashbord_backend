@@ -275,13 +275,6 @@ func (r *ProgressRepository) UpdateProblemStatus(ctx context.Context, req *progr
 	}, nil
 }
 
-// getDifficulty returns the difficulty level of a problem from the DB.
-func getDifficulty(ctx context.Context, tx pgx.Tx, problemId string) string {
-	var d string
-	tx.QueryRow(ctx, "SELECT difficulty FROM problems WHERE id::text = $1", problemId).Scan(&d) //nolint:errcheck
-	return d
-}
-
 // calculateStreak counts consecutive active days ending today.
 func calculateStreak(ctx context.Context, tx pgx.Tx, userID string) int32 {
 	rows, err := tx.Query(ctx, `

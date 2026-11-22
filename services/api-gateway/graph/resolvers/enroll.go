@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	pkgauth "github.com/knovate211/pkg/auth"
+	pkgconfig "github.com/knovate211/pkg/config"
 )
 
 // EnrollHandler sells courses online through Cashfree.
@@ -49,11 +50,11 @@ type EnrollHandler struct {
 	emailLimiter *rateLimiter
 }
 
-// courseFee is one plan's price for a course, in rupees.
+// courseFee is a course's one-time fee, in rupees. Every course is sold as a
+// single plan with everything included; scholarships are a percentage off it.
 type courseFee struct {
-	Name      string
-	SelfPaced int
-	MentorLed int
+	Name string
+	Fee  int
 }
 
 // courseFees is the authoritative price list for online payment. It MUST match
@@ -61,31 +62,30 @@ type courseFee struct {
 // also shows the amount this handler returns before the student pays, so a
 // drift is visible rather than silently charged.
 var courseFees = map[string]courseFee{
-	"5":                 {"Full Stack Development", 8999, 14999},
-	"1":                 {"Java Development", 8999, 14999},
-	"2":                 {"Front-End Technologies", 8999, 14999},
-	"4":                 {"Golang", 8999, 14999},
-	"genai":             {"GenAI & Forward Deployed Engineering", 11999, 18999},
-	"3":                 {"Mastering SQL", 4999, 7999},
-	"digital-marketing": {"Digital Marketing", 5999, 9999},
-	"seo":               {"AI SEO Specialist", 5999, 9999},
-	"testing":           {"Software Testing", 5999, 9999},
+	"5":                 {"Full Stack Development", 10000},
+	"1":                 {"Java Development", 7000},
+	"2":                 {"Front-End Technologies", 8000},
+	"4":                 {"Golang", 6000},
+	"genai":             {"GenAI & Forward Deployed Engineering", 10000},
+	"3":                 {"Mastering SQL", 6000},
+	"digital-marketing": {"Digital Marketing", 8000},
+	"seo":               {"AI SEO Specialist", 6000},
+	"testing":           {"Software Testing", 8000},
 }
+
+// The site used to sell Self-Paced and Mentor-Led separately. There is now one
+// plan, stored as "mentor"; "self" is still accepted so an old link checks out
+// at the same fee instead of failing. planNames also labels past orders.
+const soldPlan = "mentor"
 
 var planNames = map[string]string{"self": "Self-Paced", "mentor": "Mentor-Led"}
 
 func feeFor(courseID, plan string) (rupees int, courseName string, ok bool) {
 	f, found := courseFees[courseID]
-	if !found {
+	if !found || (plan != "self" && plan != "mentor") {
 		return 0, "", false
 	}
-	switch plan {
-	case "self":
-		return f.SelfPaced, f.Name, true
-	case "mentor":
-		return f.MentorLed, f.Name, true
-	}
-	return 0, "", false
+	return f.Fee, f.Name, true
 }
 
 // NewEnrollHandler wires the handler and ensures its table exists. Online
@@ -96,11 +96,11 @@ func NewEnrollHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger, 
 		Log:      log,
 		Mailer:   mailer,
 		pay:      newCashfreeFromEnv(),
-		siteBase: strings.TrimRight(envOr("SITE_BASE_URL", ""), "/"),
+		siteBase: strings.TrimRight(pkgconfig.Env("SITE_BASE_URL", ""), "/"),
 		// Per-IP off by default so a campus on one NAT address is never
 		// blocked; the per-email cap stops one person hammering checkout.
-		limiter:      newRateLimiter(envInt("ENROLL_IP_LIMIT", 0), envMinutes("ENROLL_IP_WINDOW_MIN", 10)),
-		emailLimiter: newRateLimiter(envInt("ENROLL_EMAIL_LIMIT", 10), time.Hour),
+		limiter:      newRateLimiter(pkgconfig.EnvInt("ENROLL_IP_LIMIT", 0), envMinutes("ENROLL_IP_WINDOW_MIN", 10)),
+		emailLimiter: newRateLimiter(pkgconfig.EnvInt("ENROLL_EMAIL_LIMIT", 10), time.Hour),
 	}
 	if err := h.ensureTable(ctx); err != nil {
 		return nil, err
@@ -198,21 +198,20 @@ func (h *EnrollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.fail(w, http.StatusNotFound, "not found")
+	writeErr(w, http.StatusNotFound, "not found")
 }
 
 func (h *EnrollHandler) handleConfig(w http.ResponseWriter) {
 	type fee struct {
-		CourseID  string `json:"course_id"`
-		Name      string `json:"name"`
-		SelfPaced int    `json:"self_paced"`
-		MentorLed int    `json:"mentor_led"`
+		CourseID string `json:"course_id"`
+		Name     string `json:"name"`
+		Fee      int    `json:"fee"`
 	}
 	fees := []fee{}
 	for id, f := range courseFees {
-		fees = append(fees, fee{id, f.Name, f.SelfPaced, f.MentorLed})
+		fees = append(fees, fee{id, f.Name, f.Fee})
 	}
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":   h.enabled(),
 		"gateway":   "cashfree",
 		"test_mode": h.pay.sandbox(),
@@ -223,11 +222,11 @@ func (h *EnrollHandler) handleConfig(w http.ResponseWriter) {
 // POST /api/enroll/order {course_id, plan, name, email, phone}
 func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 	if !h.enabled() {
-		h.fail(w, http.StatusServiceUnavailable, "online payment is not available right now — please request a callback instead")
+		writeErr(w, http.StatusServiceUnavailable, "online payment is not available right now — please request a callback instead")
 		return
 	}
 	if !h.limiter.allow(clientIP(r)) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
 		return
 	}
 	var req struct {
@@ -239,34 +238,35 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		ReferralCode string `json:"referral_code"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request")
+		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	name := clip(strings.TrimSpace(req.Name), 120)
 	email := strings.ToLower(clip(strings.TrimSpace(req.Email), 200))
 	phone := clip(strings.TrimSpace(req.Phone), 30)
 	if name == "" {
-		h.fail(w, http.StatusBadRequest, "please enter your name")
+		writeErr(w, http.StatusBadRequest, "please enter your name")
 		return
 	}
 	if a, err := mail.ParseAddress(email); err != nil || a.Address != email {
-		h.fail(w, http.StatusBadRequest, "please enter a valid email address — your login is sent there")
+		writeErr(w, http.StatusBadRequest, "please enter a valid email address — your login is sent there")
 		return
 	}
 	mobile, ok := cashfreePhone(phone)
 	if !ok {
-		h.fail(w, http.StatusBadRequest, "please enter a valid 10-digit mobile number (it starts with 6, 7, 8 or 9) — the payment page needs it")
+		writeErr(w, http.StatusBadRequest, "please enter a valid 10-digit mobile number (it starts with 6, 7, 8 or 9) — the payment page needs it")
 		return
 	}
 	if !h.emailLimiter.allow(email) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts for this email — please try again later")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts for this email — please try again later")
 		return
 	}
 	rupees, courseName, ok := feeFor(req.CourseID, req.Plan)
 	if !ok {
-		h.fail(w, http.StatusBadRequest, "unknown course or plan")
+		writeErr(w, http.StatusBadRequest, "unknown course or plan")
 		return
 	}
+	req.Plan = soldPlan
 
 	ctx := r.Context()
 	// Someone already on the course should sign in, not pay twice.
@@ -275,7 +275,7 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		SELECT EXISTS (SELECT 1 FROM users u JOIN user_courses uc ON uc.user_id = u.id
 		               WHERE lower(u.email) = $1 AND uc.course_id = $2)`, email, req.CourseID).Scan(&already)
 	if already {
-		h.fail(w, http.StatusConflict, "this email is already enrolled in "+courseName+" — sign in to continue learning")
+		writeErr(w, http.StatusConflict, "this email is already enrolled in "+courseName+" — sign in to continue learning")
 		return
 	}
 
@@ -296,7 +296,7 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		req.CourseID, courseName, req.Plan, amountPaise, name, email, phone,
 		quote.Code, quote.DiscountPaise, quote.Flags).Scan(&orderRowID); err != nil {
 		h.Log.Error("insert enrollment order failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start the payment — please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start the payment — please try again")
 		return
 	}
 
@@ -307,7 +307,7 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		UPDATE enrollment_orders SET payment_gateway = 'cashfree', gateway_order_id = $2, updated_at = now()
 		WHERE id = $1::uuid`, orderRowID, gatewayOrderID); err != nil {
 		h.Log.Error("store gateway order id failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not start the payment — please try again")
+		writeErr(w, http.StatusInternalServerError, "could not start the payment — please try again")
 		return
 	}
 	sessionID, err := h.pay.createOrder(ctx, cashfreeOrderReq{
@@ -323,11 +323,11 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 		h.Log.Error("create cashfree order failed", zap.Error(err))
 		_, _ = h.Pool.Exec(ctx, `UPDATE enrollment_orders SET status = 'failed', error = $2, updated_at = now() WHERE id = $1::uuid`,
 			orderRowID, clip(err.Error(), 500))
-		h.fail(w, http.StatusBadGateway, "the payment gateway did not respond — please try again in a minute")
+		writeErr(w, http.StatusBadGateway, "the payment gateway did not respond — please try again in a minute")
 		return
 	}
 
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"order_id":           gatewayOrderID,
 		"payment_session_id": sessionID,
 		"mode":               h.pay.modeName(),
@@ -349,39 +349,39 @@ func (h *EnrollHandler) handleOrder(w http.ResponseWriter, r *http.Request) {
 // Cashfree directly, so a forged or replayed callback grants nothing.
 func (h *EnrollHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if !h.enabled() {
-		h.fail(w, http.StatusServiceUnavailable, "online payment is not available")
+		writeErr(w, http.StatusServiceUnavailable, "online payment is not available")
 		return
 	}
 	var req struct {
 		OrderID string `json:"order_id"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil || !strings.HasPrefix(req.OrderID, "enr_") {
-		h.fail(w, http.StatusBadRequest, "invalid request")
+		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	ctx := r.Context()
 	paymentID, paidPaise, err := h.pay.paidOrder(ctx, req.OrderID)
 	if errors.Is(err, errNotPaid) {
-		h.fail(w, http.StatusPaymentRequired, "the payment was not completed — no money was taken. Please try again")
+		writeErr(w, http.StatusPaymentRequired, "the payment was not completed — no money was taken. Please try again")
 		return
 	}
 	if err != nil {
 		h.Log.Error("cashfree order lookup failed", zap.String("order", req.OrderID), zap.Error(err))
-		h.fail(w, http.StatusBadGateway, "we could not confirm your payment with the gateway yet — if money was deducted, it will be confirmed within a few minutes")
+		writeErr(w, http.StatusBadGateway, "we could not confirm your payment with the gateway yet — if money was deducted, it will be confirmed within a few minutes")
 		return
 	}
 	if err := h.checkAmount(ctx, req.OrderID, paidPaise); err != nil {
 		h.Log.Error("enrolment amount mismatch", zap.String("order", req.OrderID), zap.Error(err))
-		h.fail(w, http.StatusBadRequest, "the payment could not be matched to your order — contact us with order id "+req.OrderID)
+		writeErr(w, http.StatusBadRequest, "the payment could not be matched to your order — contact us with order id "+req.OrderID)
 		return
 	}
 	res, err := h.fulfil(ctx, req.OrderID, paymentID)
 	if err != nil {
 		h.Log.Error("enrolment fulfilment failed", zap.String("order", req.OrderID), zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "your payment was received but we could not finish setting up your account — our team has been notified and will contact you")
+		writeErr(w, http.StatusInternalServerError, "your payment was received but we could not finish setting up your account — our team has been notified and will contact you")
 		return
 	}
-	h.write(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, res)
 }
 
 // POST /api/enroll/webhook — Cashfree's server-to-server notice. It is what
@@ -389,36 +389,36 @@ func (h *EnrollHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 // callback ran.
 func (h *EnrollHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if !h.enabled() {
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
 	ev, err := h.pay.parseWebhook(r)
 	if err != nil {
-		h.fail(w, http.StatusBadRequest, err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Exam registrations share the Cashfree account; one that arrives here is
 	// acknowledged and left to its own handler.
 	if !ev.succeeded() || !strings.HasPrefix(ev.OrderID, "enr_") {
-		h.write(w, http.StatusOK, map[string]bool{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
 	if err := h.checkAmount(r.Context(), ev.OrderID, ev.PaidPaise); err != nil {
 		if errors.Is(err, errNotOurOrder) {
-			h.write(w, http.StatusOK, map[string]bool{"ok": true})
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 			return
 		}
 		h.Log.Error("enrolment webhook amount mismatch", zap.String("order", ev.OrderID), zap.Error(err))
-		h.write(w, http.StatusOK, map[string]bool{"ok": true}) // a retry cannot fix it; staff can
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true}) // a retry cannot fix it; staff can
 		return
 	}
 	if _, err := h.fulfil(r.Context(), ev.OrderID, ev.PaymentID); err != nil {
 		h.Log.Error("webhook fulfilment failed", zap.String("order", ev.OrderID), zap.Error(err))
 		// 500 makes Cashfree retry, which is what we want for a transient error.
-		h.fail(w, http.StatusInternalServerError, "fulfilment failed")
+		writeErr(w, http.StatusInternalServerError, "fulfilment failed")
 		return
 	}
-	h.write(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // checkAmount refuses a payment that does not match the order it claims to
@@ -619,15 +619,6 @@ func generatePassword() (string, error) {
 	return string(b), nil
 }
 
-func (h *EnrollHandler) write(w http.ResponseWriter, code int, v any) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (h *EnrollHandler) fail(w http.ResponseWriter, code int, msg string) {
-	h.write(w, code, map[string]string{"error": msg})
-}
-
 // ListOrders backs GET /api/admin/enrollments?status&search&page&page_size.
 func (h *EnrollHandler) ListOrders(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -655,7 +646,7 @@ func (h *EnrollHandler) ListOrders(w http.ResponseWriter, r *http.Request) {
 		SELECT COUNT(*), COALESCE(SUM(amount_paise) FILTER (WHERE status IN ('paid','enrolled')), 0)
 		FROM enrollment_orders WHERE `+where, args...).Scan(&total, &revenue); err != nil {
 		h.Log.Error("count enrollment orders failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load enrolments")
+		writeErr(w, http.StatusInternalServerError, "could not load enrolments")
 		return
 	}
 	args = append(args, size, (page-1)*size)
@@ -667,7 +658,7 @@ func (h *EnrollHandler) ListOrders(w http.ResponseWriter, r *http.Request) {
 		where, len(args)-1, len(args)), args...)
 	if err != nil {
 		h.Log.Error("list enrollment orders failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load enrolments")
+		writeErr(w, http.StatusInternalServerError, "could not load enrolments")
 		return
 	}
 	defer rows.Close()
@@ -706,7 +697,7 @@ func (h *EnrollHandler) ListOrders(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, x)
 	}
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"orders": out, "total": total, "revenue": revenue / 100,
 		"enabled": h.enabled(), "gateway": "cashfree", "test_mode": h.pay.sandbox(),
 	})

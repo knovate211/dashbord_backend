@@ -46,7 +46,7 @@ TAB_LIMIT=${TAB_LIMIT:-5}
 # revised — the lock is about not reading ahead, not about finality.
 
 # score% → scholarship%
-SLABS=${SLABS:-'[{"minPercent":80,"awardPercent":100},{"minPercent":65,"awardPercent":50},{"minPercent":50,"awardPercent":25}]'}
+SLABS=${SLABS:-'[{"minPercent":90,"awardPercent":30},{"minPercent":75,"awardPercent":20},{"minPercent":60,"awardPercent":10}]'}
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 MCQ_SEED=${MCQ_SEED:-$HERE/seed-scholarship-mcqs.json}

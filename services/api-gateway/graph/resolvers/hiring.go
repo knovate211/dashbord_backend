@@ -15,6 +15,8 @@ import (
 
 	"github.com/knovate211/api-gateway/middleware"
 	pkgauth "github.com/knovate211/pkg/auth"
+	pkgconfig "github.com/knovate211/pkg/config"
+	"github.com/knovate211/pkg/ids"
 )
 
 // HiringHandler runs the candidate side of a company's hiring test: the
@@ -65,7 +67,7 @@ func NewHiringHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger, 
 		// Claims only, and off (0) by default like the other per-IP limits: a
 		// campus drive has a lab of candidates opening links from one address,
 		// and a 32-byte token cannot be guessed anyway. Set it to stop a flood.
-		limiter: newRateLimiter(envInt("HIRING_CLAIM_IP_LIMIT", 0), envMinutes("HIRING_CLAIM_IP_WINDOW_MIN", 10)),
+		limiter: newRateLimiter(pkgconfig.EnvInt("HIRING_CLAIM_IP_LIMIT", 0), envMinutes("HIRING_CLAIM_IP_WINDOW_MIN", 10)),
 		mailer:  newScholarshipMailer(log),
 	}
 	if err := h.ensureTable(ctx); err != nil {
@@ -133,11 +135,19 @@ func (h *HiringHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	role := middleware.RoleFromContext(r.Context())
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	if role != "admin" && role != "recruiter" {
-		h.fail(w, http.StatusForbidden, "recruiter access required")
+		writeErr(w, http.StatusForbidden, "recruiter access required")
+		return
+	}
+
+	// Every route below carries an id in seg[1]. Checking it here lets the
+	// queries compare uuid columns directly (and use their indexes) without a
+	// malformed id turning into a database error instead of a 404.
+	if len(seg) >= 2 && !ids.IsUUID(seg[1]) {
+		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
 
@@ -151,7 +161,7 @@ func (h *HiringHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(seg) == 2 && seg[0] == "candidates" && r.Method == http.MethodDelete:
 		h.remove(w, r, role, userID, seg[1])
 	default:
-		h.fail(w, http.StatusNotFound, "unknown hiring endpoint")
+		writeErr(w, http.StatusNotFound, "unknown hiring endpoint")
 	}
 }
 
@@ -177,24 +187,24 @@ func (h *HiringHandler) loadTest(w http.ResponseWriter, ctx context.Context, rol
 		           WHERE  m.company_id = a.company_id AND m.user_id::text = $3))
 		FROM   assessments a
 		LEFT   JOIN companies c ON c.id = a.company_id
-		WHERE  a.id::text = $1
+		WHERE  a.id = $1
 	`, assessmentID, role, userID).Scan(&t.CompanyID, &t.CompanyName, &t.Title, &t.Status, &purpose,
 		&t.Duration, &t.TotalMarks, &allowed)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "test not found")
+		writeErr(w, http.StatusNotFound, "test not found")
 		return nil
 	}
 	if err != nil {
 		h.Log.Error("load hiring test failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the test")
+		writeErr(w, http.StatusInternalServerError, "could not load the test")
 		return nil
 	}
 	if !allowed {
-		h.fail(w, http.StatusForbidden, "not a member of this company")
+		writeErr(w, http.StatusForbidden, "not a member of this company")
 		return nil
 	}
 	if purpose != "hiring" {
-		h.fail(w, http.StatusBadRequest, "candidates can only be added to hiring tests")
+		writeErr(w, http.StatusBadRequest, "candidates can only be added to hiring tests")
 		return nil
 	}
 	return t
@@ -207,15 +217,15 @@ func (h *HiringHandler) candidateTest(w http.ResponseWriter, ctx context.Context
 	var assessmentID string
 	err := h.Pool.QueryRow(ctx, `
 		SELECT assessment_id::text, name, email, COALESCE(user_id::text, ''), COALESCE(invite_id::text, '')
-		FROM   hiring_candidates WHERE id::text = $1
+		FROM   hiring_candidates WHERE id = $1
 	`, candidateID).Scan(&assessmentID, &c.Name, &c.Email, &c.UserID, &c.InviteID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		h.fail(w, http.StatusNotFound, "candidate not found")
+		writeErr(w, http.StatusNotFound, "candidate not found")
 		return nil, nil
 	}
 	if err != nil {
 		h.Log.Error("load hiring candidate failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the candidate")
+		writeErr(w, http.StatusInternalServerError, "could not load the candidate")
 		return nil, nil
 	}
 	t := h.loadTest(w, ctx, role, userID, assessmentID)
@@ -264,12 +274,12 @@ func (h *HiringHandler) listCandidates(w http.ResponseWriter, r *http.Request, r
 		         WHERE  assessment_id = h.assessment_id AND user_id = h.user_id
 		         ORDER  BY started_at DESC LIMIT 1
 		       ) at ON true
-		WHERE  h.assessment_id::text = $1
+		WHERE  h.assessment_id = $1
 		ORDER  BY h.created_at DESC
 	`, assessmentID)
 	if err != nil {
 		h.Log.Error("list hiring candidates failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load candidates")
+		writeErr(w, http.StatusInternalServerError, "could not load candidates")
 		return
 	}
 	defer rows.Close()
@@ -284,7 +294,7 @@ func (h *HiringHandler) listCandidates(w http.ResponseWriter, r *http.Request, r
 		if err := rows.Scan(&v.ID, &v.Name, &v.Email, &v.Phone, &added, &emailed, &v.EmailError,
 			&expires, &claimed, &v.AttemptID, &attemptStatus, &v.Score, &v.MaxScore, &submitted); err != nil {
 			h.Log.Error("scan hiring candidate failed", zap.Error(err))
-			h.fail(w, http.StatusInternalServerError, "could not load candidates")
+			writeErr(w, http.StatusInternalServerError, "could not load candidates")
 			return
 		}
 		v.AddedAt = added.Format(time.RFC3339)
@@ -305,7 +315,7 @@ func (h *HiringHandler) listCandidates(w http.ResponseWriter, r *http.Request, r
 		}
 		out = append(out, v)
 	}
-	h.json(w, http.StatusOK, map[string]any{"candidates": out})
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": out})
 }
 
 func fmtTS(t *time.Time) string {
@@ -336,7 +346,7 @@ func (h *HiringHandler) addCandidates(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 	if t.Status != "published" {
-		h.fail(w, http.StatusBadRequest, "publish the test before adding candidates — the email takes them straight into it")
+		writeErr(w, http.StatusBadRequest, "publish the test before adding candidates — the email takes them straight into it")
 		return
 	}
 
@@ -345,20 +355,20 @@ func (h *HiringHandler) addCandidates(w http.ResponseWriter, r *http.Request, ro
 		ExpiresAt  string           `json:"expires_at"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if len(body.Candidates) == 0 {
-		h.fail(w, http.StatusBadRequest, "add at least one candidate")
+		writeErr(w, http.StatusBadRequest, "add at least one candidate")
 		return
 	}
 	if len(body.Candidates) > maxCandidatesPerRequest {
-		h.fail(w, http.StatusBadRequest, fmt.Sprintf("add at most %d candidates at a time", maxCandidatesPerRequest))
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("add at most %d candidates at a time", maxCandidatesPerRequest))
 		return
 	}
 	expires, err := linkExpiry(body.ExpiresAt)
 	if err != nil {
-		h.fail(w, http.StatusBadRequest, err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -395,7 +405,7 @@ func (h *HiringHandler) addCandidates(w http.ResponseWriter, r *http.Request, ro
 			added++
 		}
 	}
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"results": results, "added": added, "email_enabled": h.mailer.enabled(),
 	})
 }
@@ -435,7 +445,7 @@ func (h *HiringHandler) provision(ctx context.Context, t *hiringTest, actorID, n
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 		  SELECT 1 FROM attempts at JOIN users u ON u.id = at.user_id
-		  WHERE  at.assessment_id::text = $1 AND lower(u.email) = $2 AND at.status <> 'in_progress')
+		  WHERE  at.assessment_id = $1 AND lower(u.email) = $2 AND at.status <> 'in_progress')
 	`, t.ID, email).Scan(&spent); err != nil {
 		h.Log.Error("check candidate attempts failed", zap.Error(err))
 		return out, "", errors.New("could not add, please try again")
@@ -551,16 +561,16 @@ func (h *HiringHandler) resend(w http.ResponseWriter, r *http.Request, role, use
 		return
 	}
 	if t.Status != "published" {
-		h.fail(w, http.StatusBadRequest, "the test is not published")
+		writeErr(w, http.StatusBadRequest, "the test is not published")
 		return
 	}
 	res, raw, err := h.provision(ctx, t, userID, c.Name, c.Email, "", time.Now().UTC().Add(hiringLinkTTL))
 	if err != nil {
-		h.fail(w, http.StatusConflict, err.Error())
+		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
 	h.sendInvite(res.candidateID, c.Name, c.Email, t, raw, time.Now().UTC().Add(hiringLinkTTL))
-	h.json(w, http.StatusOK, map[string]any{"resent": true, "email_enabled": h.mailer.enabled()})
+	writeJSON(w, http.StatusOK, map[string]any{"resent": true, "email_enabled": h.mailer.enabled()})
 }
 
 // ─── Remove ───────────────────────────────────────────────────────────────────
@@ -573,36 +583,38 @@ func (h *HiringHandler) remove(w http.ResponseWriter, r *http.Request, role, use
 	if t == nil {
 		return
 	}
+	// c.UserID is "" for a candidate with no account yet; NULLIF turns that into
+	// a NULL that matches nothing instead of an invalid uuid.
 	var started bool
 	if err := h.Pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM attempts WHERE assessment_id::text = $1 AND user_id::text = $2)
+		SELECT EXISTS (SELECT 1 FROM attempts WHERE assessment_id = $1 AND user_id = NULLIF($2, '')::uuid)
 	`, t.ID, c.UserID).Scan(&started); err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not remove the candidate")
+		writeErr(w, http.StatusInternalServerError, "could not remove the candidate")
 		return
 	}
 	if started {
-		h.fail(w, http.StatusConflict, "this candidate has already started the test, so their result is kept")
+		writeErr(w, http.StatusConflict, "this candidate has already started the test, so their result is kept")
 		return
 	}
 
 	tx, err := h.Pool.Begin(ctx)
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not remove the candidate")
+		writeErr(w, http.StatusInternalServerError, "could not remove the candidate")
 		return
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx, `DELETE FROM hiring_candidates WHERE id::text = $1`, candidateID); err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not remove the candidate")
+	if _, err := tx.Exec(ctx, `DELETE FROM hiring_candidates WHERE id = $1`, candidateID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not remove the candidate")
 		return
 	}
 	if c.InviteID != "" {
-		if _, err := tx.Exec(ctx, `DELETE FROM assessment_invites WHERE id::text = $1`, c.InviteID); err != nil {
-			h.fail(w, http.StatusInternalServerError, "could not remove the candidate")
+		if _, err := tx.Exec(ctx, `DELETE FROM assessment_invites WHERE id = $1`, c.InviteID); err != nil {
+			writeErr(w, http.StatusInternalServerError, "could not remove the candidate")
 			return
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not remove the candidate")
+		writeErr(w, http.StatusInternalServerError, "could not remove the candidate")
 		return
 	}
 
@@ -610,13 +622,13 @@ func (h *HiringHandler) remove(w http.ResponseWriter, r *http.Request, role, use
 	// Best effort: a leftover account with no password and no invite is inert.
 	if _, err := h.Pool.Exec(ctx, `
 		DELETE FROM users u
-		WHERE  u.id::text = $1 AND u.role = 'candidate'
+		WHERE  u.id = NULLIF($1, '')::uuid AND u.role = 'candidate'
 		  AND  NOT EXISTS (SELECT 1 FROM hiring_candidates h WHERE h.user_id = u.id)
 		  AND  NOT EXISTS (SELECT 1 FROM attempts a WHERE a.user_id = u.id)
 	`, c.UserID); err != nil {
 		h.Log.Warn("remove unused candidate account failed", zap.Error(err))
 	}
-	h.json(w, http.StatusOK, map[string]any{"removed": true})
+	writeJSON(w, http.StatusOK, map[string]any{"removed": true})
 }
 
 // ─── Email ────────────────────────────────────────────────────────────────────
@@ -665,16 +677,16 @@ func (h *HiringHandler) sendInvite(candidateID, name, email string, t *hiringTes
 			// whoever reads the logs. Recorded as an error so the recruiter
 			// sees nothing was actually sent.
 			h.Log.Info("hiring test link (email disabled)", zap.String("email", email), zap.String("url", link))
-			_, _ = h.Pool.Exec(ctx, `UPDATE hiring_candidates SET email_error = $2, updated_at = now() WHERE id::text = $1`,
+			_, _ = h.Pool.Exec(ctx, `UPDATE hiring_candidates SET email_error = $2, updated_at = now() WHERE id = $1`,
 				candidateID, "email is not configured on the server")
 			return
 		}
 		if err := h.mailer.deliver([]string{email}, "", subject, text, html, email); err != nil {
-			_, _ = h.Pool.Exec(ctx, `UPDATE hiring_candidates SET email_error = $2, updated_at = now() WHERE id::text = $1`,
+			_, _ = h.Pool.Exec(ctx, `UPDATE hiring_candidates SET email_error = $2, updated_at = now() WHERE id = $1`,
 				candidateID, clip(err.Error(), 300))
 			return
 		}
-		_, _ = h.Pool.Exec(ctx, `UPDATE hiring_candidates SET emailed_at = now(), email_error = '', updated_at = now() WHERE id::text = $1`,
+		_, _ = h.Pool.Exec(ctx, `UPDATE hiring_candidates SET emailed_at = now(), email_error = '', updated_at = now() WHERE id = $1`,
 			candidateID)
 	}()
 }
@@ -689,16 +701,16 @@ func (h *HiringHandler) handleClaim(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	raw := clip(body.Token, 200)
 	if raw == "" {
-		h.fail(w, http.StatusBadRequest, "this link is missing its access code")
+		writeErr(w, http.StatusBadRequest, "this link is missing its access code")
 		return
 	}
 	if !h.limiter.allow("claim:" + clientIP(r)) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
 		return
 	}
 
@@ -718,41 +730,41 @@ func (h *HiringHandler) handleClaim(w http.ResponseWriter, r *http.Request) {
 		&title, &assessmentStatus, &company, &inviteToken, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Same answer for a token that never existed and one that was replaced.
-		h.fail(w, http.StatusUnauthorized, "this link is no longer valid — ask the hiring team to send you a new one")
+		writeErr(w, http.StatusUnauthorized, "this link is no longer valid — ask the hiring team to send you a new one")
 		return
 	}
 	if err != nil {
 		h.Log.Error("look up hiring claim failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your test, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your test, please try again")
 		return
 	}
 	if expiresAt != nil && time.Now().UTC().After(*expiresAt) {
-		h.fail(w, http.StatusUnauthorized, "this link has expired — ask the hiring team to send you a new one")
+		writeErr(w, http.StatusUnauthorized, "this link has expired — ask the hiring team to send you a new one")
 		return
 	}
 	if assessmentStatus != "published" {
-		h.fail(w, http.StatusConflict, "this test is not open at the moment — please contact the hiring team")
+		writeErr(w, http.StatusConflict, "this test is not open at the moment — please contact the hiring team")
 		return
 	}
 	// Re-checked here, not only when the candidate was added: an account can
 	// have been promoted since, and a link must never open a staff session.
 	if role == "admin" || role == "recruiter" {
 		h.Log.Warn("hiring claim refused for staff account", zap.String("email", email))
-		h.fail(w, http.StatusForbidden, "this link cannot be used — please contact the hiring team")
+		writeErr(w, http.StatusForbidden, "this link cannot be used — please contact the hiring team")
 		return
 	}
 	var done bool
 	if err := h.Pool.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM attempts
-		               WHERE assessment_id::text = $1 AND user_id::text = $2 AND status <> 'in_progress')
+		               WHERE assessment_id = $1 AND user_id = $2 AND status <> 'in_progress')
 	`, assessmentID, userID).Scan(&done); err == nil && done {
-		h.fail(w, http.StatusConflict, "you have already completed this test")
+		writeErr(w, http.StatusConflict, "you have already completed this test")
 		return
 	}
 
 	if _, err := h.Pool.Exec(ctx, `
 		UPDATE hiring_candidates SET claimed_at = COALESCE(claimed_at, now()), updated_at = now()
-		WHERE  id::text = $1
+		WHERE  id = $1
 	`, candidateID); err != nil {
 		h.Log.Warn("mark hiring claim failed", zap.Error(err))
 	}
@@ -760,10 +772,10 @@ func (h *HiringHandler) handleClaim(w http.ResponseWriter, r *http.Request) {
 	token, err := pkgauth.GenerateToken(userID, email, role, h.jwtSecret, 24*time.Hour)
 	if err != nil {
 		h.Log.Error("mint candidate session failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not open your test, please try again")
+		writeErr(w, http.StatusInternalServerError, "could not open your test, please try again")
 		return
 	}
-	h.json(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"token":        token,
 		"user":         map[string]any{"id": userID, "email": email, "name": userName, "role": role},
 		"assessmentId": assessmentID,
@@ -774,12 +786,3 @@ func (h *HiringHandler) handleClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-func (h *HiringHandler) json(w http.ResponseWriter, code int, v any) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (h *HiringHandler) fail(w http.ResponseWriter, code int, msg string) {
-	h.json(w, code, map[string]string{"error": msg})
-}

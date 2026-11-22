@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	pkgconfig "github.com/knovate211/pkg/config"
 )
 
 // cashfree is the payment gateway behind course enrolment and certification
@@ -47,7 +49,7 @@ type cashfree struct {
 const cashfreeAPIVersion = "2026-01-01"
 
 func newCashfreeFromEnv() *cashfree {
-	env := strings.ToLower(strings.TrimSpace(envOr("CASHFREE_ENV", "sandbox")))
+	env := strings.ToLower(strings.TrimSpace(pkgconfig.Env("CASHFREE_ENV", "sandbox")))
 	if env != "production" {
 		env = "sandbox"
 	}
@@ -56,11 +58,11 @@ func newCashfreeFromEnv() *cashfree {
 		base = "https://api.cashfree.com/pg"
 	}
 	return &cashfree{
-		appID:       strings.TrimSpace(envOr("CASHFREE_APP_ID", "")),
-		secret:      strings.TrimSpace(envOr("CASHFREE_SECRET_KEY", "")),
+		appID:       strings.TrimSpace(pkgconfig.Env("CASHFREE_APP_ID", "")),
+		secret:      strings.TrimSpace(pkgconfig.Env("CASHFREE_SECRET_KEY", "")),
 		env:         env,
-		apiBase:     strings.TrimRight(envOr("CASHFREE_API_BASE", base), "/"),
-		webhookBase: strings.TrimRight(envOr("PAYMENT_WEBHOOK_BASE", ""), "/"),
+		apiBase:     strings.TrimRight(pkgconfig.Env("CASHFREE_API_BASE", base), "/"),
+		webhookBase: strings.TrimRight(pkgconfig.Env("PAYMENT_WEBHOOK_BASE", ""), "/"),
 		client:      &http.Client{Timeout: 15 * time.Second},
 	}
 }

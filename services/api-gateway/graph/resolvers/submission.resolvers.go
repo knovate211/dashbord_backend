@@ -132,6 +132,11 @@ func (c *SubmissionClients) RunScratchpad(p graphql.ResolveParams) (interface{},
 		return nil, fmt.Errorf("language and code are required")
 	}
 
+	if !learnerRuns.acquire(userID) {
+		return nil, errRunInFlight
+	}
+	defer learnerRuns.release(userID)
+
 	resp, err := c.ExecutionSvc.RunScratchpad(p.Context, &executionv1.RunScratchpadRequest{
 		Language: language,
 		Code:     code,
@@ -140,7 +145,7 @@ func (c *SubmissionClients) RunScratchpad(p graphql.ResolveParams) (interface{},
 	})
 	if err != nil {
 		c.Log.Error("run scratchpad failed", zap.Error(err))
-		return nil, fmt.Errorf("run failed: %v", err)
+		return nil, runErr(err, "Could not run your code. Please try again.")
 	}
 
 	return map[string]interface{}{
@@ -169,6 +174,11 @@ func (c *SubmissionClients) RunCode(p graphql.ResolveParams) (interface{}, error
 		return nil, err
 	}
 
+	if !learnerRuns.acquire(userID) {
+		return nil, errRunInFlight
+	}
+	defer learnerRuns.release(userID)
+
 	resp, err := c.ExecutionSvc.RunCode(p.Context, &executionv1.RunCodeRequest{
 		ProblemId: problemId,
 		Language:  language,
@@ -177,7 +187,7 @@ func (c *SubmissionClients) RunCode(p graphql.ResolveParams) (interface{}, error
 	})
 	if err != nil {
 		c.Log.Error("run code failed", zap.Error(err))
-		return nil, fmt.Errorf("run code failed: %v", err)
+		return nil, runErr(err, "Could not run your code. Please try again.")
 	}
 
 	testResults := make([]interface{}, 0, len(resp.TestResults))

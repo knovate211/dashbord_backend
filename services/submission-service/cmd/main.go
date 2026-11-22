@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
+	pkgconfig "github.com/knovate211/pkg/config"
 	pkgdb "github.com/knovate211/pkg/database"
 	pkglog "github.com/knovate211/pkg/logger"
 	"github.com/knovate211/proto/codec"
@@ -108,17 +109,10 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		postgresDSN:         env("POSTGRES_DSN", "postgres://skillofide:password@localhost:5432/skillofide?sslmode=disable"),
-		natsURL:             env("NATS_URL", nats.DefaultURL),
-		progressServiceAddr: env("PROGRESS_SERVICE_ADDR", "localhost:50054"),
-		grpcPort:            env("GRPC_PORT", "50053"),
-		logLevel:            env("LOG_LEVEL", "info"),
+		postgresDSN:         pkgconfig.Env("POSTGRES_DSN", "postgres://skillofide:password@localhost:5432/skillofide?sslmode=disable"),
+		natsURL:             pkgconfig.Env("NATS_URL", nats.DefaultURL),
+		progressServiceAddr: pkgconfig.Env("PROGRESS_SERVICE_ADDR", "localhost:50054"),
+		grpcPort:            pkgconfig.Env("GRPC_PORT", "50053"),
+		logLevel:            pkgconfig.Env("LOG_LEVEL", "info"),
 	}
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

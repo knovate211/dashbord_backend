@@ -16,6 +16,7 @@ import (
 	"github.com/knovate211/api-gateway/middleware"
 	pkgauth "github.com/knovate211/pkg/auth"
 	executionv1 "github.com/knovate211/proto/execution/v1"
+	problemv1 "github.com/knovate211/proto/problem/v1"
 )
 
 // AdminHandler handles /api/admin/* REST endpoints.
@@ -23,6 +24,9 @@ import (
 type AdminHandler struct {
 	Pool *pgxpool.Pool
 	Log  *zap.Logger
+	// Problems is told when a problem is saved or deleted here, so it can drop
+	// its cached copies; nil skips that (the cache then expires on its own).
+	Problems problemv1.ProblemServiceClient
 	// Inquiries serves the enquiry list; nil disables those routes.
 	Inquiries *InquiryHandler
 	// Scholarships serves the scholarship application and programme screens;
@@ -64,7 +68,7 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.serveRecruiterLookup(w, r, path)
 			return
 		}
-		h.jsonErr(w, http.StatusForbidden, "admin access required")
+		writeErr(w, http.StatusForbidden, "admin access required")
 		return
 	}
 
@@ -311,11 +315,11 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if len(parts) == 2 {
 			h.handleRevokeCourse(w, r, parts[0], parts[1])
 		} else {
-			h.jsonErr(w, http.StatusNotFound, "not found")
+			writeErr(w, http.StatusNotFound, "not found")
 		}
 
 	default:
-		h.jsonErr(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -369,7 +373,7 @@ func (h *AdminHandler) handleBulkImport(w http.ResponseWriter, r *http.Request) 
 		SendWelcome bool `json:"send_welcome"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -386,7 +390,7 @@ func (h *AdminHandler) handleBulkImport(w http.ResponseWriter, r *http.Request) 
 		"total": len(results), "success": successCount, "send_welcome": req.SendWelcome,
 	})
 
-	h.json(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"total":   len(results),
 		"success": successCount,
 		"failed":  len(results) - successCount,
@@ -408,11 +412,11 @@ func (h *AdminHandler) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	users, total, err := h.listUsers(r.Context(), page, pageSize, userFiltersFromQuery(r))
 	if err != nil {
 		h.Log.Error("list admin users failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, "failed to list users")
+		writeErr(w, http.StatusInternalServerError, "failed to list users")
 		return
 	}
 
-	h.json(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"users":    users,
 		"total":    total,
 		"page":     page,
@@ -430,7 +434,7 @@ func (h *AdminHandler) handleUpdateUser(w http.ResponseWriter, r *http.Request, 
 		Role  *string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -438,7 +442,7 @@ func (h *AdminHandler) handleUpdateUser(w http.ResponseWriter, r *http.Request, 
 		// `recruiter` grants access to the partner hiring portal; a recruiter still
 		// needs a company_members row before they can see any drive.
 		if *req.Role != "student" && *req.Role != "admin" && *req.Role != "recruiter" {
-			h.jsonErr(w, http.StatusBadRequest, "role must be 'student', 'recruiter' or 'admin'")
+			writeErr(w, http.StatusBadRequest, "role must be 'student', 'recruiter' or 'admin'")
 			return
 		}
 	}
@@ -465,11 +469,11 @@ func (h *AdminHandler) handleUpdateUser(w http.ResponseWriter, r *http.Request, 
 		tag, err := h.Pool.Exec(r.Context(), q, args...)
 		if err != nil {
 			h.Log.Error("update user failed", zap.String("userID", userID), zap.Error(err))
-			h.jsonErr(w, http.StatusInternalServerError, err.Error())
+			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if tag.RowsAffected() == 0 {
-			h.jsonErr(w, http.StatusNotFound, "user not found")
+			writeErr(w, http.StatusNotFound, "user not found")
 			return
 		}
 	}
@@ -483,7 +487,7 @@ func (h *AdminHandler) handleUpdateUser(w http.ResponseWriter, r *http.Request, 
 		`, userID, *req.Phone)
 		if err != nil {
 			h.Log.Error("update user phone failed", zap.String("userID", userID), zap.Error(err))
-			h.jsonErr(w, http.StatusInternalServerError, err.Error())
+			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
@@ -502,7 +506,7 @@ func (h *AdminHandler) handleUpdateUser(w http.ResponseWriter, r *http.Request, 
 	}
 	h.audit(r.Context(), action, userID, h.emailOf(r.Context(), userID), detail)
 
-	h.json(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 // handleListCourses returns the course catalog used by the admin UI. This is the
@@ -513,7 +517,7 @@ func (h *AdminHandler) handleListCourses(w http.ResponseWriter, r *http.Request)
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	h.json(w, http.StatusOK, map[string]interface{}{"courses": []course{
+	writeJSON(w, http.StatusOK, map[string]interface{}{"courses": []course{
 		{ID: "1", Name: "Java Development"},
 		{ID: "2", Name: "Front-End Technologies"},
 		{ID: "3", Name: "Mastering SQL"},
@@ -528,22 +532,22 @@ func (h *AdminHandler) handleListCourses(w http.ResponseWriter, r *http.Request)
 
 func (h *AdminHandler) handleDeleteUser(w http.ResponseWriter, r *http.Request, userID string) {
 	if userID == middleware.UserIDFromContext(r.Context()) {
-		h.jsonErr(w, http.StatusBadRequest, "you cannot delete your own account")
+		writeErr(w, http.StatusBadRequest, "you cannot delete your own account")
 		return
 	}
 	email := h.emailOf(r.Context(), userID)
 	tag, err := h.Pool.Exec(r.Context(), `DELETE FROM users WHERE id = $1::uuid`, userID)
 	if err != nil {
 		h.Log.Error("delete user failed", zap.String("userID", userID), zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, err.Error())
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		h.jsonErr(w, http.StatusNotFound, "user not found")
+		writeErr(w, http.StatusNotFound, "user not found")
 		return
 	}
 	h.audit(r.Context(), "user.deleted", userID, email, nil)
-	h.json(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *AdminHandler) handleGrantCourse(w http.ResponseWriter, r *http.Request, userID string) {
@@ -551,7 +555,7 @@ func (h *AdminHandler) handleGrantCourse(w http.ResponseWriter, r *http.Request,
 		CourseID string `json:"course_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CourseID == "" {
-		h.jsonErr(w, http.StatusBadRequest, "course_id is required")
+		writeErr(w, http.StatusBadRequest, "course_id is required")
 		return
 	}
 	_, err := h.Pool.Exec(r.Context(), `
@@ -561,12 +565,12 @@ func (h *AdminHandler) handleGrantCourse(w http.ResponseWriter, r *http.Request,
 	`, userID, req.CourseID)
 	if err != nil {
 		h.Log.Error("grant course access failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, err.Error())
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.audit(r.Context(), "course.granted", userID, h.emailOf(r.Context(), userID),
 		map[string]interface{}{"course_id": req.CourseID})
-	h.json(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 func (h *AdminHandler) handleRevokeCourse(w http.ResponseWriter, r *http.Request, userID, courseID string) {
@@ -574,12 +578,12 @@ func (h *AdminHandler) handleRevokeCourse(w http.ResponseWriter, r *http.Request
 		`DELETE FROM user_courses WHERE user_id = $1::uuid AND course_id = $2`, userID, courseID)
 	if err != nil {
 		h.Log.Error("revoke course access failed", zap.Error(err))
-		h.jsonErr(w, http.StatusInternalServerError, err.Error())
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.audit(r.Context(), "course.revoked", userID, h.emailOf(r.Context(), userID),
 		map[string]interface{}{"course_id": courseID})
-	h.json(w, http.StatusOK, map[string]bool{"success": true})
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -736,15 +740,6 @@ func (h *AdminHandler) listUsers(ctx context.Context, page, pageSize int, f user
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-func (h *AdminHandler) json(w http.ResponseWriter, status int, v interface{}) {
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v) //nolint:errcheck
-}
-
-func (h *AdminHandler) jsonErr(w http.ResponseWriter, status int, msg string) {
-	h.json(w, status, map[string]string{"error": msg})
-}
 
 // Ensure pgx is used (avoid import cycle if pool comes from api-gateway's own init).
 var _ = pgx.ErrNoRows

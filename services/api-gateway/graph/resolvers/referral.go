@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/knovate211/api-gateway/middleware"
+	pkgconfig "github.com/knovate211/pkg/config"
 )
 
 // ReferralHandler runs the refer-a-friend programme.
@@ -63,8 +64,8 @@ func NewReferralHandler(ctx context.Context, pool *pgxpool.Pool, log *zap.Logger
 		siteBase: strings.TrimRight(siteBase, "/"),
 		// Per-IP off by default (one college network must not lock itself out);
 		// per-email tight, because one address only ever needs one link.
-		ipLimiter:    newRateLimiter(envInt("REFERRAL_IP_LIMIT", 0), envMinutes("REFERRAL_IP_WINDOW_MIN", 10)),
-		emailLimiter: newRateLimiter(envInt("REFERRAL_EMAIL_LIMIT", 10), time.Hour),
+		ipLimiter:    newRateLimiter(pkgconfig.EnvInt("REFERRAL_IP_LIMIT", 0), envMinutes("REFERRAL_IP_WINDOW_MIN", 10)),
+		emailLimiter: newRateLimiter(pkgconfig.EnvInt("REFERRAL_EMAIL_LIMIT", 10), time.Hour),
 	}
 	if err := h.ensureTables(ctx); err != nil {
 		return nil, err
@@ -232,7 +233,7 @@ func (h *ReferralHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/me" && r.Method == http.MethodGet:
 		h.handleMe(w, r)
 	default:
-		h.fail(w, http.StatusNotFound, "not found")
+		writeErr(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -242,10 +243,10 @@ func (h *ReferralHandler) handlePublicConfig(w http.ResponseWriter, r *http.Requ
 	p, err := h.program(r.Context())
 	if err != nil {
 		h.Log.Error("load referral program failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load the referral programme")
+		writeErr(w, http.StatusInternalServerError, "could not load the referral programme")
 		return
 	}
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"active":                  p.IsActive,
 		"courseRewardRupees":      p.CourseRewardPaise / 100,
 		"examRewardRupees":        p.ExamRewardPaise / 100,
@@ -263,7 +264,7 @@ func (h *ReferralHandler) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// Everything cheap happens before anything that touches Postgres: this is a
 	// public endpoint, and junk must cost us a parse, not a query.
 	if !h.ipLimiter.allow(clientIP(r)) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts from this network — please try again in a few minutes")
 		return
 	}
 
@@ -274,13 +275,13 @@ func (h *ReferralHandler) handleJoin(w http.ResponseWriter, r *http.Request) {
 		Website string `json:"website"` // honeypot
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request")
+		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	if strings.TrimSpace(req.Website) != "" {
 		// Looks like success to a bot, creates nothing.
 		h.Log.Info("referral honeypot triggered", zap.String("ip", clientIP(r)))
-		h.write(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
 
@@ -288,26 +289,26 @@ func (h *ReferralHandler) handleJoin(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(clip(strings.TrimSpace(req.Email), 200))
 	phone := clip(strings.TrimSpace(req.Phone), 30)
 	if name == "" {
-		h.fail(w, http.StatusBadRequest, "please enter your name")
+		writeErr(w, http.StatusBadRequest, "please enter your name")
 		return
 	}
 	if a, err := mail.ParseAddress(email); err != nil || a.Address != email {
-		h.fail(w, http.StatusBadRequest, "please enter a valid email address — your link is sent there")
+		writeErr(w, http.StatusBadRequest, "please enter a valid email address — your link is sent there")
 		return
 	}
 	if !h.emailLimiter.allow("referral:" + email) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts for this email — please try again later")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts for this email — please try again later")
 		return
 	}
 
 	p, err := h.program(r.Context())
 	if err != nil {
 		h.Log.Error("load referral program failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not create your referral link")
+		writeErr(w, http.StatusInternalServerError, "could not create your referral link")
 		return
 	}
 	if !p.IsActive {
-		h.fail(w, http.StatusServiceUnavailable, "the referral programme is not open right now")
+		writeErr(w, http.StatusServiceUnavailable, "the referral programme is not open right now")
 		return
 	}
 
@@ -322,22 +323,22 @@ func (h *ReferralHandler) handleJoin(w http.ResponseWriter, r *http.Request) {
 		if blocked {
 			// Say nothing about why. A blocked referrer who knows the rule can
 			// work around it; one who does not, stops.
-			h.fail(w, http.StatusForbidden, "we cannot create a referral link for this address — please contact us")
+			writeErr(w, http.StatusForbidden, "we cannot create a referral link for this address — please contact us")
 			return
 		}
-		h.write(w, http.StatusOK, h.linkPayload(code, name, p, false))
+		writeJSON(w, http.StatusOK, h.linkPayload(code, name, p, false))
 		return
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		h.Log.Error("look up referrer failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not create your referral link")
+		writeErr(w, http.StatusInternalServerError, "could not create your referral link")
 		return
 	}
 
 	code, err = h.uniqueCode(ctx, name)
 	if err != nil {
 		h.Log.Error("generate referral code failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not create your referral link")
+		writeErr(w, http.StatusInternalServerError, "could not create your referral link")
 		return
 	}
 
@@ -356,13 +357,13 @@ func (h *ReferralHandler) handleJoin(w http.ResponseWriter, r *http.Request) {
 		RETURNING code
 	`, code, name, email, phone, userID).Scan(&code); err != nil {
 		h.Log.Error("create referrer failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not create your referral link")
+		writeErr(w, http.StatusInternalServerError, "could not create your referral link")
 		return
 	}
 
 	h.Log.Info("referral link created", zap.String("code", code))
 	h.sendLinkEmail(name, email, code, p)
-	h.write(w, http.StatusOK, h.linkPayload(code, name, p, true))
+	writeJSON(w, http.StatusOK, h.linkPayload(code, name, p, true))
 }
 
 func (h *ReferralHandler) linkPayload(code, name string, p referralProgram, created bool) map[string]any {
@@ -418,12 +419,12 @@ func (h *ReferralHandler) uniqueCode(ctx context.Context, name string) (string, 
 func (h *ReferralHandler) handleResolve(w http.ResponseWriter, r *http.Request) {
 	code := normalizeCode(r.URL.Query().Get("code"))
 	if code == "" {
-		h.fail(w, http.StatusBadRequest, "code is required")
+		writeErr(w, http.StatusBadRequest, "code is required")
 		return
 	}
 	p, err := h.program(r.Context())
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not check that link")
+		writeErr(w, http.StatusInternalServerError, "could not check that link")
 		return
 	}
 
@@ -431,15 +432,15 @@ func (h *ReferralHandler) handleResolve(w http.ResponseWriter, r *http.Request) 
 	var blocked bool
 	err = h.Pool.QueryRow(r.Context(), `SELECT name, is_blocked FROM referrers WHERE code = $1`, code).Scan(&name, &blocked)
 	if errors.Is(err, pgx.ErrNoRows) || blocked || !p.IsActive {
-		h.write(w, http.StatusOK, map[string]any{"valid": false})
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false})
 		return
 	}
 	if err != nil {
 		h.Log.Error("resolve referral code failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not check that link")
+		writeErr(w, http.StatusInternalServerError, "could not check that link")
 		return
 	}
-	h.write(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"valid":                 true,
 		"firstName":             strings.Fields(name + " ")[0],
 		"friendDiscountPercent": p.FriendDiscountPercent,
@@ -455,12 +456,12 @@ func (h *ReferralHandler) handleClick(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request")
+		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	code := normalizeCode(req.Code)
 	if code == "" {
-		h.fail(w, http.StatusBadRequest, "code is required")
+		writeErr(w, http.StatusBadRequest, "code is required")
 		return
 	}
 	// Best effort: a click that fails to record must never block the redirect
@@ -471,7 +472,7 @@ func (h *ReferralHandler) handleClick(w http.ResponseWriter, r *http.Request) {
 	`, code, hashIP(clientIP(r)), clip(r.UserAgent(), 300), clip(req.Path, 300)); err != nil {
 		h.Log.Warn("record referral click failed", zap.Error(err))
 	}
-	h.write(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ─── POST /api/referral/status ────────────────────────────────────────────────
@@ -485,17 +486,17 @@ func (h *ReferralHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
-		h.fail(w, http.StatusBadRequest, "invalid request")
+		writeErr(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	code := normalizeCode(req.Code)
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 	if code == "" || email == "" {
-		h.fail(w, http.StatusBadRequest, "enter your referral code and the email you signed up with")
+		writeErr(w, http.StatusBadRequest, "enter your referral code and the email you signed up with")
 		return
 	}
 	if !h.ipLimiter.allow("referral-status:" + clientIP(r)) {
-		h.fail(w, http.StatusTooManyRequests, "too many attempts — please try again in a few minutes")
+		writeErr(w, http.StatusTooManyRequests, "too many attempts — please try again in a few minutes")
 		return
 	}
 
@@ -506,26 +507,26 @@ func (h *ReferralHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		// One answer for a wrong code and a wrong email, so this cannot be used
 		// to test which codes exist.
-		h.fail(w, http.StatusUnauthorized, "that code and email do not match")
+		writeErr(w, http.StatusUnauthorized, "that code and email do not match")
 		return
 	}
 	if err != nil {
 		h.Log.Error("referral status lookup failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load your referrals")
+		writeErr(w, http.StatusInternalServerError, "could not load your referrals")
 		return
 	}
 
 	summary, rows, err := h.referrerProgress(r.Context(), referrerID)
 	if err != nil {
 		h.Log.Error("referral progress failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load your referrals")
+		writeErr(w, http.StatusInternalServerError, "could not load your referrals")
 		return
 	}
 	summary["name"] = name
 	summary["code"] = code
 	summary["link"] = h.siteBase + "/r/" + code
 	summary["referrals"] = rows
-	h.write(w, http.StatusOK, summary)
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // referrerProgress is the referrer's own view: their conversions, with the
@@ -596,37 +597,37 @@ func (h *ReferralHandler) referrerProgress(ctx context.Context, referrerID strin
 func (h *ReferralHandler) handleMe(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == "" {
-		h.fail(w, http.StatusUnauthorized, "authentication required")
+		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	p, err := h.program(r.Context())
 	if err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not load your referral link")
+		writeErr(w, http.StatusInternalServerError, "could not load your referral link")
 		return
 	}
 	if !p.IsActive {
 		// The tab renders an honest "not open yet" rather than a code that
 		// would earn nothing.
-		h.write(w, http.StatusOK, map[string]any{"active": false})
+		writeJSON(w, http.StatusOK, map[string]any{"active": false})
 		return
 	}
 
 	code, name, err := h.CodeForUser(r.Context(), userID)
 	if err != nil {
 		h.Log.Error("referral code for user failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load your referral link")
+		writeErr(w, http.StatusInternalServerError, "could not load your referral link")
 		return
 	}
 
 	var referrerID string
 	if err := h.Pool.QueryRow(r.Context(), `SELECT id::text FROM referrers WHERE code = $1`, code).Scan(&referrerID); err != nil {
-		h.fail(w, http.StatusInternalServerError, "could not load your referral link")
+		writeErr(w, http.StatusInternalServerError, "could not load your referral link")
 		return
 	}
 	summary, rows, err := h.referrerProgress(r.Context(), referrerID)
 	if err != nil {
 		h.Log.Error("referral progress failed", zap.Error(err))
-		h.fail(w, http.StatusInternalServerError, "could not load your referrals")
+		writeErr(w, http.StatusInternalServerError, "could not load your referrals")
 		return
 	}
 	summary["active"] = true
@@ -637,7 +638,7 @@ func (h *ReferralHandler) handleMe(w http.ResponseWriter, r *http.Request) {
 	summary["courseRewardRupees"] = p.CourseRewardPaise / 100
 	summary["examRewardRupees"] = p.ExamRewardPaise / 100
 	summary["friendDiscountPercent"] = p.FriendDiscountPercent
-	h.write(w, http.StatusOK, summary)
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // ─── Checkout integration ─────────────────────────────────────────────────────
@@ -932,13 +933,4 @@ func hashIP(ip string) string {
 	}
 	sum := sha256.Sum256([]byte("knovate-referral:" + ip))
 	return hex.EncodeToString(sum[:8])
-}
-
-func (h *ReferralHandler) write(w http.ResponseWriter, code int, v any) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (h *ReferralHandler) fail(w http.ResponseWriter, code int, msg string) {
-	h.write(w, code, map[string]string{"error": msg})
 }

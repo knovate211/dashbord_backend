@@ -9,9 +9,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 
-	pkglog "github.com/knovate211/pkg/logger"
 	"github.com/knovate211/notification-service/internal/handler"
 	"github.com/knovate211/notification-service/internal/subscriber"
+	pkgconfig "github.com/knovate211/pkg/config"
+	pkglog "github.com/knovate211/pkg/logger"
 )
 
 func main() {
@@ -74,15 +75,8 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		natsURL:  env("NATS_URL", nats.DefaultURL),
-		httpPort: env("HTTP_PORT", "8081"),
-		logLevel: env("LOG_LEVEL", "info"),
+		natsURL:  pkgconfig.Env("NATS_URL", nats.DefaultURL),
+		httpPort: pkgconfig.Env("HTTP_PORT", "8081"),
+		logLevel: pkgconfig.Env("LOG_LEVEL", "info"),
 	}
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
