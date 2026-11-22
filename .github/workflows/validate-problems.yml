@@ -44,7 +44,11 @@ jobs:
         with:
           go-version: '1.22'
           cache: true
-      - run: go build ./services/... ./proto/...
+      - name: Build every workspace module
+        # services/ is a folder of separate modules, not a module itself, so in
+        # workspace mode `./services/...` matches nothing and go build fails.
+        # Build each module listed in go.work instead.
+        run: go build $(go list -m -f '{{.Dir}}/...')
       - run: go test ./services/execution-service/... ./services/problem-service/...
 
   content:
