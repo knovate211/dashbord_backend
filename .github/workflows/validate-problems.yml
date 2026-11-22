@@ -89,7 +89,9 @@ jobs:
 
       - name: Apply migrations
         run: |
-          go install github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+          # migrate only compiles in the database drivers named by build tags;
+          # without 'postgres' it fails with "unknown driver postgres".
+          go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1
           migrate -path=services/problem-service/migrations \
                   -database "$POSTGRES_DSN&x-migrations-table=schema_migrations_problem" up
 
